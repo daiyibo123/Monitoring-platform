@@ -5,8 +5,11 @@ export interface Env {
   DB: D1Database;
   SESSION_SECRET: string;
   // Single account. APP_PASSWORD is the login password and also the key that
-  // unlocks edit mode. ADMIN_USERNAME defaults to "admin" when unset.
+  // unlocks edit mode. APP_PASSWORD2 is an optional second, fully-equivalent
+  // password (either one logs in and unlocks editing). ADMIN_USERNAME defaults
+  // to "admin" when unset.
   APP_PASSWORD: string;
+  APP_PASSWORD2?: string;
   ADMIN_USERNAME?: string;
 }
 

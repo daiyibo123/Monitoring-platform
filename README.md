@@ -57,6 +57,7 @@ cp .dev.vars.example .dev.vars
 #   编辑 .dev.vars，设置 APP_PASSWORD 和 SESSION_SECRET
 #   生成随机密钥：openssl rand -hex 32
 #   APP_PASSWORD 既是登录密码，也是解锁编辑模式的密码
+#   可选：再设 APP_PASSWORD2 作为第二个等价密码（两个都能登录、都能解锁编辑）
 #   登录用户名默认 admin（可用 ADMIN_USERNAME 覆盖）
 
 # 2) 初始化本地数据库（可选，应用首次请求会自动建表）
@@ -149,6 +150,7 @@ cp .dev.vars.example .dev.vars
 #   Edit .dev.vars: set APP_PASSWORD and SESSION_SECRET
 #   Generate a random secret: openssl rand -hex 32
 #   APP_PASSWORD is both the login password and the edit-mode unlock password
+#   Optional: set APP_PASSWORD2 as a second, fully-equivalent password (either logs in and unlocks editing)
 #   Login username defaults to "admin" (override with ADMIN_USERNAME)
 
 # 2) Initialize the local DB (optional; tables auto-create on first request)

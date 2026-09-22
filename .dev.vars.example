@@ -5,6 +5,8 @@
 # APP_PASSWORD is the login password. It also unlocks edit mode after login.
 # ADMIN_USERNAME defaults to "admin".
 APP_PASSWORD=change-me-to-a-strong-password
+# Optional second, fully-equivalent password (either one logs in and unlocks editing).
+# APP_PASSWORD2=another-strong-password
 # ADMIN_USERNAME=admin
 
 # Secret used to sign session cookies (HMAC-SHA256). Use a long random string.

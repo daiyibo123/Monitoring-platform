@@ -54,26 +54,40 @@ export interface Credentials {
   password: string;
 }
 
-// Verify login credentials against the single configured account. Returns true
-// when the username matches ADMIN_USERNAME (default "admin") and the password
-// matches APP_PASSWORD. Every branch does the same amount of HMAC work so
-// account existence is not timing-observable.
+// Matches `password` against either configured password (APP_PASSWORD and the
+// optional APP_PASSWORD2). Both are fully equivalent — either logs in and either
+// unlocks edit mode. Both comparisons always run so timing never reveals which
+// (or whether the second) password is set.
+async function passwordMatches(password: string, env: Env): Promise<boolean> {
+  const secret = env.SESSION_SECRET;
+  const p1 = env.APP_PASSWORD || "";
+  const p2 = env.APP_PASSWORD2 || "";
+  const p1Ok = await constantTimeEqual(password, p1, secret);
+  const p2Ok = await constantTimeEqual(password, p2, secret);
+  // A blank/unset second password must never match (even an empty input).
+  return p1Ok || (p2.length > 0 && p2Ok);
+}
+
+// Verify login credentials against the configured account. Returns true when the
+// username matches ADMIN_USERNAME (default "admin") and the password matches
+// either APP_PASSWORD or APP_PASSWORD2. Every branch does the same amount of HMAC
+// work so account existence is not timing-observable.
 export async function verifyCredentials(input: Credentials, env: Env): Promise<boolean> {
   const secret = env.SESSION_SECRET;
   if (!secret || !env.APP_PASSWORD) return false;
 
   const adminUser = env.ADMIN_USERNAME || "admin";
   const userOk = await constantTimeEqual(input.username, adminUser, secret);
-  const passOk = await constantTimeEqual(input.password, env.APP_PASSWORD, secret);
+  const passOk = await passwordMatches(input.password, env);
   return userOk && passOk;
 }
 
 // Verify just the password (used to unlock edit mode for an already-authed
-// session). Compares against APP_PASSWORD only.
+// session). Matches either APP_PASSWORD or APP_PASSWORD2.
 export async function verifyPassword(password: string, env: Env): Promise<boolean> {
   const secret = env.SESSION_SECRET;
   if (!secret || !env.APP_PASSWORD) return false;
-  return constantTimeEqual(password, env.APP_PASSWORD, secret);
+  return passwordMatches(password, env);
 }
 
 export interface Session {
