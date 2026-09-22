@@ -226,10 +226,14 @@ async function fetchOpenAiBalance(base: string, key: string): Promise<BalanceRes
     );
     const totalUsageCents = usage.ok && usage.body && typeof usage.body.total_usage === "number" ? usage.body.total_usage : 0;
     const usedUsd = totalUsageCents / 100;
+    // New-API hard-codes hard_limit_usd = 100000000 for UNLIMITED-quota tokens
+    // (see controller/billing.go). Don't surface "1亿 − 用量" as a balance; report
+    // it as unlimited (null) and keep the meaningful used amount instead.
+    const unlimited = hardLimit >= 100000000;
     return {
-      balance_usd: Number((hardLimit - usedUsd).toFixed(4)),
+      balance_usd: unlimited ? null : Number((hardLimit - usedUsd).toFixed(4)),
       total_usage_usd: Number(usedUsd.toFixed(4)),
-      raw: { source: "subscription", subscription: sub.body, usage: usage.body },
+      raw: { source: "subscription", unlimited, subscription: sub.body, usage: usage.body },
       reachable: true,
     };
   }
