@@ -1,0 +1,12 @@
+# Copy this file to `.dev.vars` for local `wrangler pages dev`.
+# `.dev.vars` is gitignored and never committed.
+
+# --- Account ---
+# APP_PASSWORD is the login password. It also unlocks edit mode after login.
+# ADMIN_USERNAME defaults to "admin".
+APP_PASSWORD=change-me-to-a-strong-password
+# ADMIN_USERNAME=admin
+
+# Secret used to sign session cookies (HMAC-SHA256). Use a long random string.
+# Generate one with:  openssl rand -hex 32
+SESSION_SECRET=please-generate-a-long-random-hex-string

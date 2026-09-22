@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.wrangler/
+.dev.vars
+*.local
+.DS_Store
+npm-debug.log*
+.vscode/
+.idea/
+
+# local dev artifacts (never commit)
+cookies*.txt
+wrangler-dev.log
+*.tsbuildinfo

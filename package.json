@@ -1,0 +1,33 @@
+{
+  "name": "relay-monitor",
+  "version": "1.0.0",
+  "private": true,
+  "description": "中转站监控平台 - 监控 AI API 中转站的可用性、倍率与余额",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "wrangler pages dev dist",
+    "pages:dev": "npm run build && wrangler pages dev dist",
+    "db:init": "wrangler d1 execute relay-monitor --local --file=./migrations/0001_init.sql",
+    "db:init:remote": "wrangler d1 execute relay-monitor --remote --file=./migrations/0001_init.sql",
+    "typecheck": "tsc -b --noEmit"
+  },
+  "dependencies": {
+    "lucide-react": "0.468.0",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260426.1",
+    "@types/react": "18.3.12",
+    "@types/react-dom": "18.3.1",
+    "@vitejs/plugin-react": "4.3.4",
+    "autoprefixer": "10.4.20",
+    "postcss": "8.4.49",
+    "tailwindcss": "3.4.17",
+    "typescript": "5.7.2",
+    "vite": "6.0.3",
+    "wrangler": "4.86.0"
+  }
+}

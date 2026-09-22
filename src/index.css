@@ -1,0 +1,89 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    @apply bg-ink-950 text-slate-200 antialiased;
+    background-image:
+      radial-gradient(1000px 640px at 82% -12%, rgba(128, 152, 255, 0.18), transparent 60%),
+      radial-gradient(820px 560px at 4% 8%, rgba(168, 85, 247, 0.14), transparent 58%),
+      radial-gradient(760px 720px at 50% 118%, rgba(34, 211, 238, 0.1), transparent 60%);
+    background-attachment: fixed;
+  }
+  ::selection {
+    @apply bg-brand-500/30 text-white;
+  }
+  /* subtle grid texture over the whole app */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 0;
+    background-image:
+      linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+    background-size: 44px 44px;
+    mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, #000 40%, transparent 100%);
+  }
+  #root {
+    position: relative;
+    z-index: 1;
+  }
+}
+
+@layer components {
+  .card {
+    @apply rounded-2xl border border-white/[0.07] bg-ink-850/60 shadow-card backdrop-blur-xl;
+  }
+  .card-hover {
+    @apply transition-all duration-300 hover:border-brand-500/25 hover:shadow-glow;
+  }
+  .btn {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-xl px-3.5 py-2 text-sm font-medium transition-all duration-150 disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .btn-primary {
+    @apply btn relative overflow-hidden text-white active:scale-[0.97];
+    background-image: linear-gradient(135deg, #5b7cff 0%, #7c5bff 100%);
+    box-shadow: 0 6px 22px -8px rgba(91, 124, 255, 0.8);
+  }
+  .btn-primary:hover {
+    box-shadow: 0 8px 28px -8px rgba(124, 91, 255, 0.9);
+    filter: brightness(1.08);
+  }
+  .btn-ghost {
+    @apply btn border border-white/10 bg-white/[0.03] text-slate-200 hover:border-white/20 hover:bg-white/[0.07] hover:text-white active:scale-[0.97];
+  }
+  .input {
+    @apply w-full rounded-xl border border-white/10 bg-ink-900/70 px-3.5 py-2.5 text-sm text-slate-100 placeholder:text-slate-600 outline-none transition-all focus:border-brand-500/60 focus:bg-ink-900 focus:ring-2 focus:ring-brand-500/25;
+  }
+}
+
+@layer utilities {
+  .text-gradient {
+    @apply bg-clip-text text-transparent;
+    background-image: linear-gradient(120deg, #a9baff 0%, #c4a5ff 45%, #7be8fb 100%);
+  }
+  .ring-glow {
+    box-shadow: 0 0 0 1px rgba(91, 124, 255, 0.25), 0 0 24px -4px rgba(91, 124, 255, 0.5);
+  }
+  .scrollbar-thin::-webkit-scrollbar {
+    height: 6px;
+    width: 6px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    @apply rounded-full bg-white/10;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+    @apply bg-white/20;
+  }
+}
