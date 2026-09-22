@@ -9,7 +9,7 @@ pages_build_output_dir = "dist"
 [[d1_databases]]
 binding = "DB"
 database_name = "relay-monitor"
-database_id = "a4463519-2299-4b9c-b3fd-69cf8afcfaea"
+database_id = "f9c918cd-bdc1-4f9f-a3a7-20f6261131a0"
 
 # Non-secret vars can live here. Secrets (APP_PASSWORD, SESSION_SECRET) must be
 # set with `wrangler pages secret put <NAME>` or in the dashboard, NOT here.
