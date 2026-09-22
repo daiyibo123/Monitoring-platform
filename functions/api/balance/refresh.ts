@@ -23,7 +23,7 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
     keys.map(async (key) => {
       const site = siteMap.get(key.site_id);
       if (!site) return { key_id: key.id, balance_usd: null, total_usage_usd: null };
-      const bal = await refreshBalance(site.base_url, key.api_key, site.kind);
+      const bal = await refreshBalance(site.base_url, key.api_key, site.kind, site.access_token);
       await saveBalance(env, key.id, bal.balance_usd, bal.total_usage_usd, bal.raw);
       return { key_id: key.id, balance_usd: bal.balance_usd, total_usage_usd: bal.total_usage_usd };
     }),

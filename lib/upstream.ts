@@ -48,6 +48,19 @@ function authHeaders(key: string): HeadersInit {
   };
 }
 
+// Call a New-API user-scoped panel endpoint (/api/pricing, /api/user/self) with
+// the operator's access token. New-API's user-auth middleware reads the token
+// from a raw `Authorization` header; some forks expect `Bearer`, so we retry
+// with that prefix when the raw form is rejected.
+async function fetchWithUserToken(url: string, accessToken: string): Promise<HttpResult> {
+  const base = { Accept: "application/json", "User-Agent": "relay-monitor/1.0" };
+  let res = await fetchJson(url, { method: "GET", headers: { ...base, Authorization: accessToken } });
+  if (res.status === 401 || res.status === 403) {
+    res = await fetchJson(url, { method: "GET", headers: { ...base, Authorization: `Bearer ${accessToken}` } });
+  }
+  return res;
+}
+
 function ymd(d: Date): string {
   return d.toISOString().slice(0, 10);
 }
@@ -101,20 +114,9 @@ async function fetchNewApiPricing(
   accessToken: string,
 ): Promise<{ groupRatio: number | null; ratios: ModelRatio[]; found: boolean }> {
   const url = `${base}/api/pricing`;
-  const commonHeaders = { Accept: "application/json", "User-Agent": "relay-monitor/1.0" };
-
-  let res = await fetchJson(url, {
-    method: "GET",
-    headers: accessToken ? { ...commonHeaders, Authorization: accessToken } : authHeaders(key),
-  });
-  // If a supplied access token was rejected raw, retry it as a Bearer token.
-  if (accessToken && (res.status === 401 || res.status === 403)) {
-    res = await fetchJson(url, {
-      method: "GET",
-      headers: { ...commonHeaders, Authorization: `Bearer ${accessToken}` },
-    });
-  }
-  const { ok, body } = res;
+  const { ok, body } = accessToken
+    ? await fetchWithUserToken(url, accessToken)
+    : await fetchJson(url, { method: "GET", headers: authHeaders(key) });
   if (!ok || !body || typeof body !== "object") return { groupRatio: null, ratios: [], found: false };
 
   const data = Array.isArray(body.data) ? body.data : [];
@@ -286,8 +288,59 @@ async function fetchOpenAiBalance(base: string, key: string): Promise<BalanceRes
   return { balance_usd: null, total_usage_usd: null, raw: { source: "none" }, reachable };
 }
 
-async function fetchBalance(base: string, key: string, kind: SiteKind): Promise<BalanceResult> {
+// New-API user balance via the panel API (needs the site access token). The
+// sk- billing routes often report the "unlimited" sentinel or 401 on New-API,
+// so when a token is present this is the authoritative balance:
+//   GET /api/user/self  -> { data: { quota, used_quota } }  (New-API quota unit)
+//   GET /api/status     -> { data: { quota_per_unit } }     (quota per 1 USD)
+// balance_usd = quota / quota_per_unit. quota_per_unit defaults to 500000.
+const DEFAULT_QUOTA_PER_UNIT = 500000;
+
+async function fetchNewApiUserBalance(base: string, accessToken: string): Promise<BalanceResult> {
+  const self = await fetchWithUserToken(`${base}/api/user/self`, accessToken);
+  if (self.networkError) {
+    return { balance_usd: null, total_usage_usd: null, raw: { source: "user-self", error: self.body }, reachable: false };
+  }
+  const data = self.ok && self.body && typeof self.body === "object" ? self.body.data : null;
+  if (!data || typeof data !== "object" || typeof data.quota !== "number") {
+    // 401/403 => token wrong; other codes still let the caller fall back.
+    return {
+      balance_usd: null,
+      total_usage_usd: null,
+      raw: { source: "user-self", status: self.status },
+      reachable: self.status !== 401 && self.status !== 403,
+    };
+  }
+
+  // quota_per_unit is exposed on the public /api/status; fall back to the default.
+  let quotaPerUnit = DEFAULT_QUOTA_PER_UNIT;
+  const status = await fetchJson(`${base}/api/status`, {
+    method: "GET",
+    headers: { Accept: "application/json", "User-Agent": "relay-monitor/1.0" },
+  });
+  const sd = status.ok && status.body && typeof status.body === "object" ? status.body.data : null;
+  if (sd && typeof sd.quota_per_unit === "number" && sd.quota_per_unit > 0) {
+    quotaPerUnit = sd.quota_per_unit;
+  }
+
+  const remaining = data.quota / quotaPerUnit;
+  const used = typeof data.used_quota === "number" ? data.used_quota / quotaPerUnit : null;
+  return {
+    balance_usd: Number(remaining.toFixed(4)),
+    total_usage_usd: used != null ? Number(used.toFixed(4)) : null,
+    raw: { source: "newapi-user-self", quota_per_unit: quotaPerUnit, quota: data.quota, used_quota: data.used_quota },
+    reachable: true,
+  };
+}
+
+async function fetchBalance(base: string, key: string, kind: SiteKind, accessToken: string): Promise<BalanceResult> {
   if (kind === "sub2api") return fetchSub2ApiUsage(base, key);
+  // New-API with an access token: the user-panel balance is authoritative and
+  // works even where the sk- billing routes are locked or report "unlimited".
+  if (kind === "newapi" && accessToken) {
+    const userBal = await fetchNewApiUserBalance(base, accessToken);
+    if (userBal.reachable && userBal.balance_usd != null) return userBal;
+  }
   return fetchOpenAiBalance(base, key);
 }
 
@@ -304,7 +357,7 @@ export async function testKey(
   const [modelsRes, pricingRes, balanceRes] = await Promise.all([
     fetchModels(base, apiKey),
     fetchPricing(base, apiKey, kind, groupName, accessToken),
-    fetchBalance(base, apiKey, kind),
+    fetchBalance(base, apiKey, kind, accessToken),
   ]);
 
   // "可达即可用": the station counts as alive if ANY authenticated endpoint
@@ -356,7 +409,7 @@ async function fetchPricing(base: string, key: string, kind: SiteKind, groupName
 }
 
 // Balance-only refresh (used for auto-refresh on login / manual refresh).
-export async function refreshBalance(baseUrl: string, apiKey: string, kind: SiteKind) {
+export async function refreshBalance(baseUrl: string, apiKey: string, kind: SiteKind, accessToken = "") {
   const base = normalizeBase(baseUrl);
-  return fetchBalance(base, apiKey, kind);
+  return fetchBalance(base, apiKey, kind, accessToken);
 }
