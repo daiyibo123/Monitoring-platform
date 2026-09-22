@@ -41,7 +41,7 @@ export function SiteCard({
   onEditSite: () => void;
   onDeleteSite: () => void;
 }) {
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(true);
   const [channel, setChannel] = useState<ProviderId | "all">("all");
 
   const aliveCount = site.keys.filter((k) => k.status?.alive === 1).length;
