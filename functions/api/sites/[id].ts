@@ -7,20 +7,21 @@ export const onRequestPut: PagesFunction<Env> = async ({ request, env, params })
   const id = Number(params.id);
   if (!Number.isFinite(id)) return fail("无效的网站 ID");
 
-  const body = await readJson<{ name?: string; base_url?: string; kind?: string; note?: string }>(request);
+  const body = await readJson<{ name?: string; base_url?: string; kind?: string; note?: string; access_token?: string }>(request);
   const name = (body.name || "").trim();
   const baseUrl = (body.base_url || "").trim();
   const kind = (KINDS.includes(body.kind as SiteKind) ? body.kind : "newapi") as SiteKind;
   const note = (body.note || "").trim();
+  const accessToken = (body.access_token || "").trim();
 
   if (!name) return fail("请填写网站名称");
   if (!/^https?:\/\//i.test(baseUrl)) return fail("网站地址需以 http:// 或 https:// 开头");
 
   const now = Math.floor(Date.now() / 1000);
   await env.DB.prepare(
-    `UPDATE sites SET name=?2, base_url=?3, kind=?4, note=?5, updated_at=?6 WHERE id=?1`,
+    `UPDATE sites SET name=?2, base_url=?3, kind=?4, note=?5, access_token=?6, updated_at=?7 WHERE id=?1`,
   )
-    .bind(id, name, baseUrl, kind, note, now)
+    .bind(id, name, baseUrl, kind, note, accessToken, now)
     .run();
 
   return ok({ id });

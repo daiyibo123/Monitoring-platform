@@ -40,6 +40,7 @@ export interface Site {
   base_url: string;
   kind: SiteKind;
   note: string;
+  access_token: string;
   sort: number;
   created_at: number;
   updated_at: number;

@@ -103,6 +103,8 @@ npx wrangler pages secret put ADMIN_USERNAME   # 可选，默认 admin
 
 **分组标识**：中转站若按分组区分倍率（如 `default` / `vip`），在 Key 上填对应分组标识即可匹配；留空取默认分组。
 
+**访问令牌（可选，仅 New-API）**：部分 New-API 站点把 `/api/pricing` 锁在登录之后，用中转 `sk-` key 会返回 401，导致倍率读不到。此时在该站「个人设置 → 生成访问令牌」复制访问令牌，填到网站的「访问令牌」字段即可读取分组倍率（该令牌只用于读取 `/api/pricing`，`/v1/models`、余额仍用 `sk-` key）。留空则用 `sk-` key 尝试，对未上锁的站点照常可用。
+
 ### 🔒 安全说明
 
 - 所有 `/api/*`（除登录 / 会话检查）都需有效会话 Cookie；凭据用常量时间比较校验，令牌用 `SESSION_SECRET` 做 HMAC 签名、携带 `edit` 标志、7 天过期。
@@ -195,6 +197,8 @@ npx wrangler pages secret put ADMIN_USERNAME   # optional, defaults to "admin"
 | `openai` | none | plain OpenAI-compatible endpoints, test + balance only |
 
 **Group name**: if the relay differentiates ratios by group (e.g. `default` / `vip`), set the matching group name on the key; leave blank for the default group.
+
+**Access token (optional, New-API only)**: some New-API stations gate `/api/pricing` behind login, so the relay `sk-` key gets a 401 and ratios can't be read. Generate a user access token on that station ("Personal settings → Generate access token") and paste it into the site's "access token" field to read group ratios (the token is used only for `/api/pricing`; `/v1/models` and balance still use the `sk-` key). Leave it blank to try the `sk-` key, which works on stations that leave pricing public.
 
 ### 🔒 Security Notes
 

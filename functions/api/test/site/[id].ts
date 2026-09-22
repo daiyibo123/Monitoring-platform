@@ -16,7 +16,7 @@ export const onRequestPost: PagesFunction<Env> = async ({ env, params }) => {
 
   const results = await Promise.all(
     list.map(async (key) => {
-      const result = await testKey(site.base_url, key.api_key, site.kind, key.group_name);
+      const result = await testKey(site.base_url, key.api_key, site.kind, key.group_name, site.access_token);
       await saveTestResult(env, key.id, result);
       return { key_id: key.id, result };
     }),

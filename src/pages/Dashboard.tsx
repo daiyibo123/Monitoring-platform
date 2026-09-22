@@ -151,7 +151,7 @@ export function Dashboard({
   }
 
   // ---- CRUD ----
-  async function saveSite(data: { name: string; base_url: string; kind: SiteKind; note: string }) {
+  async function saveSite(data: { name: string; base_url: string; kind: SiteKind; note: string; access_token: string }) {
     if (siteModal.site) await api.updateSite(siteModal.site.id, data);
     else await api.createSite(data);
     await load();

@@ -86,15 +86,35 @@ async function fetchModels(
 // ---- New-API pricing: GET /api/pricing -------------------------------------
 // Returns per-model ratios (data[]) plus a top-level group_ratio map. We match
 // the key's declared group_name to pick its group multiplier.
+//
+// Many New-API stations gate /api/pricing behind login: it runs through the
+// user-auth middleware, not token-auth, so the relay `sk-` key gets 401 there.
+// When the operator has supplied a New-API "access token" for the site, we send
+// it instead. New-API reads that token from a raw `Authorization` header (no
+// `Bearer` prefix); some forks accept `Bearer`, so we try raw first and fall
+// back. Without an access token we still try the `sk-` key — it works on
+// stations that leave pricing public.
 async function fetchNewApiPricing(
   base: string,
   key: string,
   groupName: string,
+  accessToken: string,
 ): Promise<{ groupRatio: number | null; ratios: ModelRatio[]; found: boolean }> {
-  const { ok, body } = await fetchJson(`${base}/api/pricing`, {
+  const url = `${base}/api/pricing`;
+  const commonHeaders = { Accept: "application/json", "User-Agent": "relay-monitor/1.0" };
+
+  let res = await fetchJson(url, {
     method: "GET",
-    headers: authHeaders(key),
+    headers: accessToken ? { ...commonHeaders, Authorization: accessToken } : authHeaders(key),
   });
+  // If a supplied access token was rejected raw, retry it as a Bearer token.
+  if (accessToken && (res.status === 401 || res.status === 403)) {
+    res = await fetchJson(url, {
+      method: "GET",
+      headers: { ...commonHeaders, Authorization: `Bearer ${accessToken}` },
+    });
+  }
+  const { ok, body } = res;
   if (!ok || !body || typeof body !== "object") return { groupRatio: null, ratios: [], found: false };
 
   const data = Array.isArray(body.data) ? body.data : [];
@@ -277,12 +297,13 @@ export async function testKey(
   apiKey: string,
   kind: SiteKind,
   groupName: string,
+  accessToken = "",
 ): Promise<TestResult> {
   const base = normalizeBase(baseUrl);
 
   const [modelsRes, pricingRes, balanceRes] = await Promise.all([
     fetchModels(base, apiKey),
-    fetchPricing(base, apiKey, kind, groupName),
+    fetchPricing(base, apiKey, kind, groupName, accessToken),
     fetchBalance(base, apiKey, kind),
   ]);
 
@@ -315,7 +336,7 @@ interface PricingResult {
   source: TestResult["pricing_source"];
 }
 
-async function fetchPricing(base: string, key: string, kind: SiteKind, groupName: string): Promise<PricingResult> {
+async function fetchPricing(base: string, key: string, kind: SiteKind, groupName: string, accessToken: string): Promise<PricingResult> {
   if (kind === "openai") {
     return { groupRatio: null, ratios: [], reachable: false, source: "none" };
   }
@@ -330,7 +351,7 @@ async function fetchPricing(base: string, key: string, kind: SiteKind, groupName
       source: billing.groupRatio != null ? "sub2api-billing" : "none",
     };
   }
-  const p = await fetchNewApiPricing(base, key, groupName);
+  const p = await fetchNewApiPricing(base, key, groupName, accessToken);
   return { groupRatio: p.groupRatio, ratios: p.ratios, reachable: p.found, source: p.found ? "pricing" : "none" };
 }
 

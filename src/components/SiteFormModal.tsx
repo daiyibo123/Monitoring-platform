@@ -16,12 +16,13 @@ export function SiteFormModal({
 }: {
   site: Site | null;
   onClose: () => void;
-  onSubmit: (data: { name: string; base_url: string; kind: SiteKind; note: string }) => Promise<void>;
+  onSubmit: (data: { name: string; base_url: string; kind: SiteKind; note: string; access_token: string }) => Promise<void>;
 }) {
   const [name, setName] = useState(site?.name ?? "");
   const [baseUrl, setBaseUrl] = useState(site?.base_url ?? "");
   const [kind, setKind] = useState<SiteKind>(site?.kind ?? "newapi");
   const [note, setNote] = useState(site?.note ?? "");
+  const [accessToken, setAccessToken] = useState(site?.access_token ?? "");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -30,7 +31,7 @@ export function SiteFormModal({
     setError(null);
     setSaving(true);
     try {
-      await onSubmit({ name: name.trim(), base_url: baseUrl.trim(), kind, note: note.trim() });
+      await onSubmit({ name: name.trim(), base_url: baseUrl.trim(), kind, note: note.trim(), access_token: accessToken.trim() });
       onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : "保存失败");
@@ -61,6 +62,20 @@ export function SiteFormModal({
             ))}
           </select>
         </Field>
+        {kind === "newapi" && (
+          <Field label="访问令牌（可选）">
+            <input
+              className="input font-mono"
+              value={accessToken}
+              onChange={(e) => setAccessToken(e.target.value)}
+              placeholder="仅当该站把倍率锁在登录后才需要"
+              autoComplete="off"
+            />
+            <p className="mt-1 text-xs text-slate-500">
+              部分 New-API 站点的 <code>/api/pricing</code> 需登录才能访问，用 sk- key 会 401。此时在站内「个人设置 → 生成访问令牌」复制填入，即可读取分组倍率。留空则用 sk- key 尝试。
+            </p>
+          </Field>
+        )}
         <Field label="备注（可选）">
           <input className="input" value={note} onChange={(e) => setNote(e.target.value)} placeholder="任意备注" />
         </Field>

@@ -1,14 +1,15 @@
 -- 中转站监控平台 - 数据库结构
 -- Sites (中转站): one site can hold many keys/groups.
 CREATE TABLE IF NOT EXISTS sites (
-  id          INTEGER PRIMARY KEY AUTOINCREMENT,
-  name        TEXT    NOT NULL,
-  base_url    TEXT    NOT NULL,
-  kind        TEXT    NOT NULL DEFAULT 'newapi', -- 'newapi' | 'sub2api' | 'openai'
-  note        TEXT    NOT NULL DEFAULT '',
-  sort        INTEGER NOT NULL DEFAULT 0,
-  created_at  INTEGER NOT NULL,
-  updated_at  INTEGER NOT NULL
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  name         TEXT    NOT NULL,
+  base_url     TEXT    NOT NULL,
+  kind         TEXT    NOT NULL DEFAULT 'newapi', -- 'newapi' | 'sub2api' | 'openai'
+  note         TEXT    NOT NULL DEFAULT '',
+  access_token TEXT    NOT NULL DEFAULT '',       -- New-API 用户「访问令牌」，用于读取锁在登录后的 /api/pricing
+  sort         INTEGER NOT NULL DEFAULT 0,
+  created_at   INTEGER NOT NULL,
+  updated_at   INTEGER NOT NULL
 );
 
 -- API keys / groups belonging to a site.

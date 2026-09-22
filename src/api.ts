@@ -60,9 +60,9 @@ export const api = {
   lock: () => request<{ edit: boolean }>("/api/lock", { method: "POST" }),
 
   listSites: () => request<Site[]>("/api/sites"),
-  createSite: (data: { name: string; base_url: string; kind: SiteKind; note: string }) =>
+  createSite: (data: { name: string; base_url: string; kind: SiteKind; note: string; access_token: string }) =>
     request<{ id: number }>("/api/sites", { method: "POST", body: JSON.stringify(data) }),
-  updateSite: (id: number, data: { name: string; base_url: string; kind: SiteKind; note: string }) =>
+  updateSite: (id: number, data: { name: string; base_url: string; kind: SiteKind; note: string; access_token: string }) =>
     request<{ id: number }>(`/api/sites/${id}`, { method: "PUT", body: JSON.stringify(data) }),
   deleteSite: (id: number) => request<{ id: number }>(`/api/sites/${id}`, { method: "DELETE" }),
 

@@ -21,6 +21,9 @@ export interface Site {
   base_url: string;
   kind: SiteKind;
   note: string;
+  // Optional New-API user "access token". Some stations gate /api/pricing behind
+  // login (the relay sk- key gets 401 there); this token reads it. Empty = unused.
+  access_token: string;
   sort: number;
   created_at: number;
   updated_at: number;

@@ -10,21 +10,22 @@ export const onRequestGet: PagesFunction<Env> = async ({ env }) => {
 };
 
 export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
-  const body = await readJson<{ name?: string; base_url?: string; kind?: string; note?: string }>(request);
+  const body = await readJson<{ name?: string; base_url?: string; kind?: string; note?: string; access_token?: string }>(request);
   const name = (body.name || "").trim();
   const baseUrl = (body.base_url || "").trim();
   const kind = (KINDS.includes(body.kind as SiteKind) ? body.kind : "newapi") as SiteKind;
   const note = (body.note || "").trim();
+  const accessToken = (body.access_token || "").trim();
 
   if (!name) return fail("请填写网站名称");
   if (!/^https?:\/\//i.test(baseUrl)) return fail("网站地址需以 http:// 或 https:// 开头");
 
   const now = Math.floor(Date.now() / 1000);
   const res = await env.DB.prepare(
-    `INSERT INTO sites (name, base_url, kind, note, sort, created_at, updated_at)
-     VALUES (?1, ?2, ?3, ?4, 0, ?5, ?5)`,
+    `INSERT INTO sites (name, base_url, kind, note, access_token, sort, created_at, updated_at)
+     VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?6)`,
   )
-    .bind(name, baseUrl, kind, note, now)
+    .bind(name, baseUrl, kind, note, accessToken, now)
     .run();
 
   return ok({ id: res.meta.last_row_id });

@@ -14,7 +14,7 @@ export const onRequestPost: PagesFunction<Env> = async ({ env, params }) => {
   const site = await env.DB.prepare("SELECT * FROM sites WHERE id=?1").bind(key.site_id).first<Site>();
   if (!site) return fail("网站不存在", 404);
 
-  const result = await testKey(site.base_url, key.api_key, site.kind, key.group_name);
+  const result = await testKey(site.base_url, key.api_key, site.kind, key.group_name, site.access_token);
   await saveTestResult(env, id, result);
 
   return ok({ key_id: id, result });
