@@ -2,8 +2,15 @@ import type { Env } from "./types";
 
 // Single-account session auth. Login issues a read-only session; re-entering the
 // password unlocks edit mode. On success we issue an HMAC-SHA256 signed token
-// (carrying an `edit` flag) stored in an HttpOnly, Secure, SameSite=Strict
-// cookie. No secret ever reaches the browser.
+// (carrying an `edit` flag) stored in an HttpOnly, Secure, SameSite=Lax cookie.
+// No secret ever reaches the browser.
+//
+// SameSite=Lax (not Strict): a session cookie must survive top-level navigations
+// into the app — bookmarks, an http→https or apex/www redirect, or arriving from
+// an external link. Strict withholds the cookie on all of those, so a page reload
+// that isn't a straight same-URL refresh looks unauthenticated and bounces the
+// user to login. Lax still blocks the cookie on cross-site POSTs, which preserves
+// CSRF protection for our state-changing routes.
 
 const COOKIE_NAME = "rm_session";
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 7; // 7 days
@@ -125,13 +132,13 @@ export async function verifySessionToken(token: string, env: Env): Promise<Sessi
 }
 
 export function buildSessionCookie(token: string, secure: boolean): string {
-  const attrs = [`${COOKIE_NAME}=${token}`, "HttpOnly", "Path=/", "SameSite=Strict", `Max-Age=${SESSION_TTL_SECONDS}`];
+  const attrs = [`${COOKIE_NAME}=${token}`, "HttpOnly", "Path=/", "SameSite=Lax", `Max-Age=${SESSION_TTL_SECONDS}`];
   if (secure) attrs.push("Secure");
   return attrs.join("; ");
 }
 
 export function buildClearCookie(secure: boolean): string {
-  const attrs = [`${COOKIE_NAME}=`, "HttpOnly", "Path=/", "SameSite=Strict", "Max-Age=0"];
+  const attrs = [`${COOKIE_NAME}=`, "HttpOnly", "Path=/", "SameSite=Lax", "Max-Age=0"];
   if (secure) attrs.push("Secure");
   return attrs.join("; ");
 }

@@ -43,7 +43,7 @@
 | 前端 | React 18 + Vite + Tailwind CSS（构建为静态资源） |
 | 后端 | Cloudflare Pages Functions（`/functions/api/*`） |
 | 存储 | Cloudflare D1（SQLite） |
-| 鉴权 | HMAC-SHA256 签名会话（HttpOnly / Secure / SameSite=Strict Cookie），Web Crypto 实现 |
+| 鉴权 | HMAC-SHA256 签名会话（HttpOnly / Secure / SameSite=Lax Cookie），Web Crypto 实现 |
 
 > 所有上游请求都在服务端发起，天然规避浏览器 CORS，API Key 不会下发到前端。
 
@@ -136,7 +136,7 @@ A self-hosted dashboard for monitoring AI API relay stations (New-API / One-API 
 | Frontend | React 18 + Vite + Tailwind CSS (built to static assets) |
 | Backend | Cloudflare Pages Functions (`/functions/api/*`) |
 | Storage | Cloudflare D1 (SQLite) |
-| Auth | HMAC-SHA256 signed sessions (HttpOnly / Secure / SameSite=Strict cookie) via Web Crypto |
+| Auth | HMAC-SHA256 signed sessions (HttpOnly / Secure / SameSite=Lax cookie) via Web Crypto |
 
 > All upstream requests are made server-side, avoiding browser CORS and never sending API keys to the frontend.
 
