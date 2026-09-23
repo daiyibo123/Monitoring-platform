@@ -1,8 +1,8 @@
-import { buildClearCookie, isSecureRequest } from "../../lib/auth";
+import { buildClearCookie, cookieDomain, isSecureRequest } from "../../lib/auth";
 import type { Env } from "../../lib/types";
 
-export const onRequestPost: PagesFunction<Env> = async ({ request }) => {
-  const cookie = buildClearCookie(isSecureRequest(request));
+export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
+  const cookie = buildClearCookie(isSecureRequest(request), cookieDomain(env));
   return new Response(JSON.stringify({ success: true }), {
     status: 200,
     headers: {

@@ -131,14 +131,29 @@ export async function verifySessionToken(token: string, env: Env): Promise<Sessi
   }
 }
 
-export function buildSessionCookie(token: string, secure: boolean): string {
+// Optional cookie Domain. By default the session cookie is HOST-ONLY (no Domain
+// attribute), so a cookie set while visiting www.example.com is NOT sent back to
+// the apex example.com (or vice-versa) after an apex/www redirect — the user
+// lands unauthenticated and gets bounced to login on refresh. Set COOKIE_DOMAIN
+// to the registrable domain (e.g. "example.com") to share the cookie across the
+// apex and all its subdomains. LEAVE IT UNSET for *.pages.dev deployments — a
+// public-suffix domain like "pages.dev" is rejected by the browser and breaks
+// login entirely.
+export function cookieDomain(env: Env): string | undefined {
+  const d = env.COOKIE_DOMAIN?.trim();
+  return d ? d : undefined;
+}
+
+export function buildSessionCookie(token: string, secure: boolean, domain?: string): string {
   const attrs = [`${COOKIE_NAME}=${token}`, "HttpOnly", "Path=/", "SameSite=Lax", `Max-Age=${SESSION_TTL_SECONDS}`];
+  if (domain) attrs.push(`Domain=${domain}`);
   if (secure) attrs.push("Secure");
   return attrs.join("; ");
 }
 
-export function buildClearCookie(secure: boolean): string {
+export function buildClearCookie(secure: boolean, domain?: string): string {
   const attrs = [`${COOKIE_NAME}=`, "HttpOnly", "Path=/", "SameSite=Lax", "Max-Age=0"];
+  if (domain) attrs.push(`Domain=${domain}`);
   if (secure) attrs.push("Secure");
   return attrs.join("; ");
 }

@@ -1,4 +1,4 @@
-import { buildSessionCookie, createSessionToken, isSecureRequest, verifyCredentials } from "../../lib/auth";
+import { buildSessionCookie, cookieDomain, createSessionToken, isSecureRequest, verifyCredentials } from "../../lib/auth";
 import { fail, readJson } from "../../lib/http";
 import type { Env } from "../../lib/types";
 
@@ -15,7 +15,7 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
 
   // Login lands in read-only mode; editing requires unlocking with the password.
   const token = await createSessionToken(false, env);
-  const cookie = buildSessionCookie(token, isSecureRequest(request));
+  const cookie = buildSessionCookie(token, isSecureRequest(request), cookieDomain(env));
   return new Response(JSON.stringify({ success: true, data: { ok: true } }), {
     status: 200,
     headers: {

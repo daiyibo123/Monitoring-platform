@@ -1,4 +1,4 @@
-import { buildSessionCookie, createSessionToken, isSecureRequest, verifyPassword } from "../../lib/auth";
+import { buildSessionCookie, cookieDomain, createSessionToken, isSecureRequest, verifyPassword } from "../../lib/auth";
 import { fail, readJson } from "../../lib/http";
 import type { Env } from "../../lib/types";
 
@@ -12,7 +12,7 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   if (!(await verifyPassword(password, env))) return fail("密码错误", 401);
 
   const token = await createSessionToken(true, env);
-  const cookie = buildSessionCookie(token, isSecureRequest(request));
+  const cookie = buildSessionCookie(token, isSecureRequest(request), cookieDomain(env));
   return new Response(JSON.stringify({ success: true, data: { edit: true } }), {
     status: 200,
     headers: {

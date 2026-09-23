@@ -11,6 +11,9 @@ export interface Env {
   APP_PASSWORD: string;
   APP_PASSWORD2?: string;
   ADMIN_USERNAME?: string;
+  // Optional cookie Domain to share the session across apex/www (e.g.
+  // "example.com"). Leave unset for *.pages.dev — see cookieDomain() in auth.ts.
+  COOKIE_DOMAIN?: string;
 }
 
 export type SiteKind = "newapi" | "sub2api" | "openai";
