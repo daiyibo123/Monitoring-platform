@@ -21,5 +21,14 @@ export const onRequestGet: PagesFunction<Env> = async ({ request, env }) => {
     );
   }
 
-  return json({ authed: session != null, configured, edit: session?.edit === true }, { headers });
+  // NOTE: this must return the same { success, data } envelope every other
+  // endpoint uses, because the frontend api.request() unwraps `body.data`. If we
+  // return a bare { authed, ... } object, api.session() resolves to `undefined`,
+  // App.tsx's `const { authed } = await api.session()` throws on destructuring,
+  // the catch drops the user to "guest" — and the dashboard bounces to login on
+  // EVERY refresh, regardless of whether the session cookie is perfectly valid.
+  return json(
+    { success: true, data: { authed: session != null, configured, edit: session?.edit === true } },
+    { headers },
+  );
 };
