@@ -12,21 +12,14 @@ import type { ApiKey } from "../types";
 import { CopyButton } from "./CopyButton";
 import { formatRatio, formatTimeAgo, formatUsd, maskKey } from "../lib/format";
 import { PROVIDERS, type ProviderId } from "../lib/providers";
+import { keyState, STATE_META, type KeyState } from "../lib/status";
 
-function StatusDot({ alive }: { alive: number | null }) {
-  const cls =
-    alive === 1 ? "bg-emerald-400" : alive === 0 ? "bg-rose-400" : "bg-slate-500";
-  const label = alive === 1 ? "可用" : alive === 0 ? "不可用" : "未测活";
+function StatusDot({ state }: { state: KeyState }) {
+  const m = STATE_META[state];
   return (
-    <span className="inline-flex items-center gap-1.5">
-      <span className={`h-2 w-2 rounded-full ${cls} ${alive === 1 ? "shadow-[0_0_8px] shadow-emerald-400/60" : ""}`} />
-      <span
-        className={
-          alive === 1 ? "text-emerald-400" : alive === 0 ? "text-rose-400" : "text-slate-500"
-        }
-      >
-        {label}
-      </span>
+    <span className="inline-flex items-center gap-1.5" title={state === "no_quota" ? "Key 可用，但账户余额已用尽" : undefined}>
+      <span className={`h-2 w-2 rounded-full ${m.dot} ${m.glow ? "shadow-[0_0_8px] shadow-emerald-400/60" : ""}`} />
+      <span className={m.text}>{m.label}</span>
     </span>
   );
 }
@@ -45,6 +38,7 @@ export function KeyRow({
   apiKey,
   editMode,
   provider,
+  accountBalance,
   testing,
   onTest,
   onEdit,
@@ -54,6 +48,8 @@ export function KeyRow({
   apiKey: ApiKey;
   editMode: boolean;
   provider: ProviderId | null;
+  // Site-level account balance, shared by all keys — decides 无额度 vs 可用.
+  accountBalance: number | null;
   testing: boolean;
   onTest: () => void;
   onEdit: () => void;
@@ -64,6 +60,7 @@ export function KeyRow({
   const [revealed, setRevealed] = useState(false);
   const s = apiKey.status;
   const ratios = s?.model_ratios ?? [];
+  const state = keyState(s?.alive, accountBalance);
 
   return (
     <div className={`rounded-xl border border-white/5 bg-ink-900/50 transition-colors hover:border-white/10 hover:bg-ink-900/80 ${className}`}>
@@ -71,7 +68,7 @@ export function KeyRow({
       <div className="flex items-center gap-2 px-4 py-2.5">
         {/* identity */}
         <div className="flex min-w-0 shrink items-center gap-2">
-          <StatusDot alive={s?.alive ?? null} />
+          <StatusDot state={state} />
           <span className="truncate text-sm font-semibold text-slate-100">
             {apiKey.label || apiKey.group_name || "未命名分组"}
           </span>

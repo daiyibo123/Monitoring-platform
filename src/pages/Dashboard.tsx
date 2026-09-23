@@ -9,6 +9,7 @@ import { KeyFormModal } from "../components/KeyFormModal";
 import { Modal } from "../components/Modal";
 import { formatUsd } from "../lib/format";
 import { siteBalance } from "../lib/balance";
+import { keyState } from "../lib/status";
 
 export function Dashboard({
   edit: editMode,
@@ -106,14 +107,32 @@ export function Dashboard({
 
   const stats = useMemo(() => {
     let keys = 0;
-    let alive = 0;
+    let available = 0;
+    let noQuota = 0;
     for (const site of sites) {
+      const bal = siteBalance(site);
       for (const k of site.keys) {
         keys++;
-        if (k.status?.alive === 1) alive++;
+        const st = keyState(k.status?.alive, bal);
+        if (st === "available") available++;
+        else if (st === "no_quota") noQuota++;
       }
     }
-    return { sites: sites.length, keys, alive };
+    return { sites: sites.length, keys, available, noQuota };
+  }, [sites]);
+
+  // Sites ordered by account balance, high -> low (the number operators scan
+  // for first). Unknown/unlimited balances (null) sink to the bottom; ties keep
+  // their original server order thanks to a stable sort.
+  const sortedSites = useMemo(() => {
+    return [...sites].sort((a, b) => {
+      const ba = siteBalance(a);
+      const bb = siteBalance(b);
+      if (ba == null && bb == null) return 0;
+      if (ba == null) return 1;
+      if (bb == null) return -1;
+      return bb - ba;
+    });
   }, [sites]);
 
   // ---- test actions ----
@@ -314,7 +333,7 @@ export function Dashboard({
           <div className="mt-5 grid grid-cols-2 gap-3 lg:grid-cols-4">
             <StatTile icon={Globe} label="网站" value={String(stats.sites)} tone="brand" />
             <StatTile icon={KeyRound} label="Key 总数" value={String(stats.keys)} tone="slate" />
-            <StatTile icon={Activity} label="可用" value={`${stats.alive} / ${stats.keys}`} tone="emerald" />
+            <StatTile icon={Activity} label={stats.noQuota > 0 ? `可用（另 ${stats.noQuota} 无额度）` : "可用"} value={`${stats.available} / ${stats.keys}`} tone="emerald" />
             <StatTile icon={Wallet} label="总余额" value={formatUsd(totalBalance)} tone="emerald" mono />
           </div>
         </div>
@@ -347,7 +366,7 @@ export function Dashboard({
       ) : (
         // One site per row (full width); keys inside each card use a 2-col grid.
         <div className="space-y-4">
-          {sites.map((site, i) => (
+          {sortedSites.map((site, i) => (
             <div
               key={site.id}
               className="animate-fade-in"

@@ -14,6 +14,7 @@ import { CopyButton } from "./CopyButton";
 import { KeyRow } from "./KeyRow";
 import { formatUsd } from "../lib/format";
 import { siteBalance } from "../lib/balance";
+import { keyState } from "../lib/status";
 import { detectProviders, PROVIDERS, type ProviderId } from "../lib/providers";
 
 export function SiteCard({
@@ -44,9 +45,22 @@ export function SiteCard({
   const [collapsed, setCollapsed] = useState(true);
   const [channel, setChannel] = useState<ProviderId | "all">("all");
 
-  const aliveCount = site.keys.filter((k) => k.status?.alive === 1).length;
   const total = site.keys.length;
   const balance = siteBalance(site);
+
+  // Per-key three-state tally, so the header agrees with the row dots: a key
+  // that answers but whose account balance is spent counts as 无额度, NOT 可用.
+  // Balance is site-level, shared by every key on this site.
+  const counts = useMemo(() => {
+    let available = 0;
+    let noQuota = 0;
+    for (const k of site.keys) {
+      const st = keyState(k.status?.alive, balance);
+      if (st === "available") available++;
+      else if (st === "no_quota") noQuota++;
+    }
+    return { available, noQuota };
+  }, [site.keys, balance]);
 
   // Provider per key (from its accessible models), used for chips + filtering.
   const keyProviders = useMemo(() => {
@@ -55,12 +69,29 @@ export function SiteCard({
     return map;
   }, [site.keys]);
 
-  // Distinct channels present across the site's keys, for the chip row.
+  // Distinct channels present across the site's keys, for the chip row. Uses
+  // each key's PRIMARY provider so the filter chips line up with visibleKeys'
+  // primary-based filtering below.
   const channels = useMemo(() => {
     const set = new Set<ProviderId>();
     for (const p of keyProviders.values()) if (p) set.add(p);
     return [...set];
   }, [keyProviders]);
+
+  // ALL model families offered anywhere on the site — the union over every
+  // key's full provider list, not just the primary. A single relay key often
+  // exposes both GPT and Claude models; the header badges must show both, so
+  // they read from this (ordered by how many keys back each family), while the
+  // filter chips above stay primary-based.
+  const families = useMemo(() => {
+    const counts = new Map<ProviderId, number>();
+    for (const k of site.keys) {
+      for (const p of detectProviders(k.status?.models).providers) {
+        counts.set(p, (counts.get(p) ?? 0) + 1);
+      }
+    }
+    return [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([id]) => id);
+  }, [site.keys]);
 
   // Keys sorted by group ratio (low -> high); null ratios last. Then filtered
   // by the selected channel. Sorting is derived (no persistence needed).
@@ -109,13 +140,39 @@ export function SiteCard({
           </div>
         </button>
 
+        {/* provider badges — what this site offers (GPT / Claude / …), shown
+            in the header so it reads at a glance even while collapsed. */}
+        {families.length > 0 && (
+          <div className="hidden shrink-0 items-center gap-1.5 md:flex">
+            {families.slice(0, 5).map((p) => (
+              <span
+                key={p}
+                className={`shrink-0 rounded-md px-1.5 py-0.5 text-[11px] font-medium ring-1 ${PROVIDERS[p].badge}`}
+                title={`该站提供 ${PROVIDERS[p].label} 模型`}
+              >
+                {PROVIDERS[p].label}
+              </span>
+            ))}
+            {families.length > 5 && (
+              <span className="shrink-0 text-[11px] text-slate-500">+{families.length - 5}</span>
+            )}
+          </div>
+        )}
+
         {/* summary + actions, all inline on the right */}
         <div className="flex shrink-0 items-center gap-2">
-          <div className="flex items-center gap-1.5 rounded-lg bg-white/5 px-2.5 py-1 text-sm ring-1 ring-white/5" title="可用 Key 数">
-            <span className={`h-1.5 w-1.5 rounded-full ${aliveCount > 0 ? "bg-emerald-400 shadow-[0_0_6px] shadow-emerald-400/70" : "bg-slate-600"}`} />
-            <span className="font-semibold text-emerald-400">{aliveCount}</span>
+          <div className="flex items-center gap-1.5 rounded-lg bg-white/5 px-2.5 py-1 text-sm ring-1 ring-white/5" title="可用 Key 数（有额度且可用）">
+            <span className={`h-1.5 w-1.5 rounded-full ${counts.available > 0 ? "bg-emerald-400 shadow-[0_0_6px] shadow-emerald-400/70" : "bg-slate-600"}`} />
+            <span className="font-semibold text-emerald-400">{counts.available}</span>
             <span className="text-slate-500">/{total}</span>
           </div>
+          {counts.noQuota > 0 && (
+            <div className="flex items-center gap-1.5 rounded-lg bg-amber-500/10 px-2 py-1 text-sm ring-1 ring-amber-500/25" title="Key 可用，但账户余额已用尽">
+              <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
+              <span className="font-semibold text-amber-300">{counts.noQuota}</span>
+              <span className="text-xs text-amber-400/80">无额度</span>
+            </div>
+          )}
           <div className="flex items-center gap-1.5 rounded-lg border border-emerald-500/25 bg-emerald-500/[0.07] px-2.5 py-1 shadow-glow-emerald" title="账户余额（网站级，只显示一次）">
             <Wallet size={15} className="text-emerald-400" />
             <span className="font-mono text-base font-bold text-emerald-300">{formatUsd(balance)}</span>
@@ -176,6 +233,7 @@ export function SiteCard({
                 apiKey={k}
                 editMode={editMode}
                 provider={keyProviders.get(k.id) ?? null}
+                accountBalance={balance}
                 testing={testingKeys.has(k.id)}
                 onTest={() => onTestKey(k)}
                 onEdit={() => onEditKey(k)}
