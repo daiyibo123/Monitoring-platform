@@ -360,12 +360,19 @@ export async function testKey(
     fetchBalance(base, apiKey, kind, accessToken),
   ]);
 
-  // "可达即可用": the station counts as alive if ANY authenticated endpoint
-  // answered without an auth failure — models listing, the ratio endpoint, or
-  // the balance endpoint. This fixes the case where a valid key returns a
-  // multiplier/balance but /v1/models happens to 404/405 on that station.
+  // A 401/403 on GET /v1/models means THIS sk- key was rejected → authoritatively
+  // dead. Crucially this is NOT overridden by a reachable pricing/balance endpoint:
+  // on New-API those are read with the site ACCESS TOKEN, so they answer even for a
+  // rejected key and would otherwise mark an unusable key 可用 (the reported bug).
+  //
+  // Only when the key was NOT rejected do we fall back to "可达即可用": the station
+  // counts as alive if any authenticated endpoint answered without an auth failure.
+  // That keeps a valid key alive when /v1/models happens to 404/405 on the station.
   const modelsOk = modelsRes.status >= 200 && modelsRes.status < 300;
-  const alive = modelsOk || modelsRes.reachable || pricingRes.reachable || balanceRes.reachable;
+  const modelsRejected = modelsRes.status === 401 || modelsRes.status === 403;
+  const alive = modelsRejected
+    ? false
+    : modelsOk || modelsRes.reachable || pricingRes.reachable || balanceRes.reachable;
 
   return {
     alive,

@@ -74,9 +74,15 @@ export function SiteCard({
   // primary-based filtering below.
   const channels = useMemo(() => {
     const set = new Set<ProviderId>();
-    for (const p of keyProviders.values()) if (p) set.add(p);
+    // Skip the "other" catch-all — we only surface recognised model families.
+    for (const p of keyProviders.values()) if (p && p !== "other") set.add(p);
     return [...set];
   }, [keyProviders]);
+
+  // If the selected channel no longer exists (its last key was deleted / re-tested
+  // into another family, or dropped as "其它"), fall back to 全部 so the list can't
+  // strand on an empty, un-resettable filter.
+  const effectiveChannel = channel === "all" || channels.includes(channel) ? channel : "all";
 
   // ALL model families offered anywhere on the site — the union over every
   // key's full provider list, not just the primary. A single relay key often
@@ -87,6 +93,8 @@ export function SiteCard({
     const counts = new Map<ProviderId, number>();
     for (const k of site.keys) {
       for (const p of detectProviders(k.status?.models).providers) {
+        // Only real model families in the header badges — never the "其它" bucket.
+        if (p === "other") continue;
         counts.set(p, (counts.get(p) ?? 0) + 1);
       }
     }
@@ -104,9 +112,9 @@ export function SiteCard({
       if (rb == null) return -1;
       return ra - rb;
     });
-    if (channel === "all") return sorted;
-    return sorted.filter((k) => keyProviders.get(k.id) === channel);
-  }, [site.keys, channel, keyProviders]);
+    if (effectiveChannel === "all") return sorted;
+    return sorted.filter((k) => keyProviders.get(k.id) === effectiveChannel);
+  }, [site.keys, effectiveChannel, keyProviders]);
 
   return (
     <div className="card card-hover group relative overflow-hidden">
@@ -206,11 +214,11 @@ export function SiteCard({
           {channels.length > 1 && (
             <div className="flex flex-wrap items-center gap-1.5 pb-1">
               <span className="mr-0.5 text-[11px] text-slate-500">渠道</span>
-              <ChannelChip active={channel === "all"} onClick={() => setChannel("all")} label={`全部 ${total}`} />
+              <ChannelChip active={effectiveChannel === "all"} onClick={() => setChannel("all")} label={`全部 ${total}`} />
               {channels.map((p) => (
                 <ChannelChip
                   key={p}
-                  active={channel === p}
+                  active={effectiveChannel === p}
                   onClick={() => setChannel(p)}
                   label={PROVIDERS[p].label}
                   badge={PROVIDERS[p].badge}

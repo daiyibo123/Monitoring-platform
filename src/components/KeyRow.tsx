@@ -25,7 +25,8 @@ function StatusDot({ state }: { state: KeyState }) {
 }
 
 function ProviderBadge({ provider }: { provider: ProviderId | null }) {
-  if (!provider) return null;
+  // "other" (其它) is an unrecognised-model catch-all — don't badge it.
+  if (!provider || provider === "other") return null;
   const meta = PROVIDERS[provider];
   return (
     <span className={`rounded-md px-1.5 py-0.5 text-[11px] font-medium ring-1 ${meta.badge}`}>
