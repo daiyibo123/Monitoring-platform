@@ -158,19 +158,37 @@ export function buildClearCookie(secure: boolean, domain?: string): string {
   return attrs.join("; ");
 }
 
-export function readSessionCookie(request: Request): string {
+// Collect EVERY value the browser sent for our cookie. A user can end up
+// holding more than one rm_session at once — e.g. a leftover empty cookie from
+// a prior logout, or two entries with different Path/Domain scopes accumulated
+// across redeploys. The browser sends them all in one Cookie header, and the
+// first is not necessarily the valid one. We skip empty values and hand the
+// rest to getSession so it can pick whichever actually verifies, instead of
+// blindly taking the first match (which, if it were the dead cookie, would log
+// the user out on every refresh even though a good cookie is right behind it).
+export function readSessionCookies(request: Request): string[] {
   const header = request.headers.get("Cookie") || "";
+  const tokens: string[] = [];
   for (const part of header.split(";")) {
-    const [k, ...rest] = part.trim().split("=");
-    if (k === COOKIE_NAME) return rest.join("=");
+    const trimmed = part.trim();
+    const eq = trimmed.indexOf("=");
+    if (eq < 0) continue;
+    if (trimmed.slice(0, eq) !== COOKIE_NAME) continue;
+    const value = trimmed.slice(eq + 1);
+    if (value) tokens.push(value);
   }
-  return "";
+  return tokens;
 }
 
-// Returns the session, or null if unauthenticated.
+// Returns the session, or null if unauthenticated. Tries each rm_session value
+// the browser sent and returns the first that verifies, so a stale/duplicate
+// cookie can't shadow the real one.
 export async function getSession(request: Request, env: Env): Promise<Session | null> {
-  const token = readSessionCookie(request);
-  return verifySessionToken(token, env);
+  for (const token of readSessionCookies(request)) {
+    const session = await verifySessionToken(token, env);
+    if (session) return session;
+  }
+  return null;
 }
 
 export function isSecureRequest(request: Request): boolean {
