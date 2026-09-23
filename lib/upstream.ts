@@ -360,19 +360,30 @@ export async function testKey(
     fetchBalance(base, apiKey, kind, accessToken),
   ]);
 
-  // A 401/403 on GET /v1/models means THIS sk- key was rejected → authoritatively
-  // dead. Crucially this is NOT overridden by a reachable pricing/balance endpoint:
-  // on New-API those are read with the site ACCESS TOKEN, so they answer even for a
-  // rejected key and would otherwise mark an unusable key 可用 (the reported bug).
+  // A 401/403 on GET /v1/models normally means THIS sk- key was rejected →
+  // authoritatively dead, and NOT overridden by a reachable pricing/balance
+  // endpoint (on New-API those authenticate with the site ACCESS TOKEN, so they
+  // answer even for a rejected key — the reported "无效 key 却显示可用" bug).
+  //
+  // EXCEPTION: when the upstream account is out of money, New-API rejects even a
+  // VALID key here with "insufficient account balance". That must surface as
+  // 无额度 (alive + balance≤0), not 不可用. So if the balance endpoint confirms the
+  // account is drained, keep the key alive and let keyState() render 无额度.
   //
   // Only when the key was NOT rejected do we fall back to "可达即可用": the station
-  // counts as alive if any authenticated endpoint answered without an auth failure.
-  // That keeps a valid key alive when /v1/models happens to 404/405 on the station.
+  // counts as alive if any authed endpoint answered without an auth failure — that
+  // keeps a valid key alive when /v1/models happens to 404/405 on the station.
   const modelsOk = modelsRes.status >= 200 && modelsRes.status < 300;
   const modelsRejected = modelsRes.status === 401 || modelsRes.status === 403;
-  const alive = modelsRejected
-    ? false
-    : modelsOk || modelsRes.reachable || pricingRes.reachable || balanceRes.reachable;
+  const balanceSpent = balanceRes.balance_usd != null && balanceRes.balance_usd <= 0;
+  let alive: boolean;
+  if (modelsOk) {
+    alive = true;
+  } else if (modelsRejected) {
+    alive = balanceSpent; // drained account → 无额度; otherwise a genuinely bad key → 不可用
+  } else {
+    alive = modelsRes.reachable || pricingRes.reachable || balanceRes.reachable;
+  }
 
   return {
     alive,
