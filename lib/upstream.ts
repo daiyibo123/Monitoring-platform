@@ -371,17 +371,33 @@ async function fetchBalance(base: string, key: string, kind: SiteKind, accessTok
 // failed on our own noise — the probe escalates at ZERO extra token cost:
 //   • try FAMILY-DIVERSE, cheapest-first models (see pickProbeModels) — so a key
 //     scoped to one family (claude/gemini/deepseek/…) still gets a model it can use;
+//   • try BOTH endpoint shapes for a "claude" model — the Anthropic-native
+//     POST /v1/messages (x-api-key + anthropic-version) FIRST, then the OpenAI
+//     /v1/chat/completions fallback — because many Claude stations ONLY answer the
+//     Anthropic path and 403 the OpenAI one (a good key would else show 不可用, the
+//     exact "这个是可用的但显示不可用" + "HTTP 403 非 JSON 页面" the operator hit);
+//   • send the probe with a browser-like User-Agent, so a Cloudflare/WAF bot
+//     filter that 403s a non-browser UA doesn't turn a good key into a false 不可用;
 //   • a transient failure (超时 / 5xx / 网关或防护页) is retried once after a short
 //     delay, so a one-off blip doesn't fail a good key;
 //   • a model/channel failure falls back to the next candidate model — the key may
 //     work with a different model;
-//   • HTTP 200 only counts as 可用 if the body carries a real choices[] completion,
-//     so a 200-wrapped "无可用渠道" error can't masquerade as alive;
+//   • HTTP 200 only counts as 可用 if the body carries a real completion (choices[]
+//     for OpenAI, content[] for Anthropic), so a 200-wrapped "无可用渠道" error can't
+//     masquerade as alive;
 //   • the whole escalation is capped (PROBE_MAX_MODELS / PROBE_MAX_ATTEMPTS) to bound subrequests.
 // Only a genuine SUCCESS generates tokens (~2, from a "hi" + max_tokens:1); every
 // failure returns an error WITHOUT a completion, so the retries/fallbacks cost 0
 // tokens and the minimum-token guarantee holds. Runs on the manual 测活 buttons
 // and on the once-per-day auto sweep (lib/autotest.ts); never on balance refresh.
+// Some relay stations sit behind Cloudflare/WAF that 403s a non-browser
+// User-Agent on the POST completion path (while GET /v1/models may still pass).
+// Send the real-request probe with a browser-like UA so a bot filter doesn't turn
+// a good key into a false 不可用. (Balance/models/pricing keep their own UA — they
+// already work and this change is scoped to the probe that was misfiring.)
+const PROBE_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+
 const PROBE_MODEL_PREFERENCES = [
   "gpt-4o-mini",
   "gpt-4.1-mini",
@@ -526,14 +542,20 @@ interface ChatAttempt {
   model: string;
 }
 
-// One real completion call, classified. A "hi" + max_tokens:1 answers in ~1-3s on
-// a healthy channel; the 10s cap turns a hung channel into a fast transient.
+// One real completion call against the OpenAI-compatible /v1/chat/completions
+// shape, classified. A "hi" + max_tokens:1 answers in ~1-3s on a healthy channel;
+// the 10s cap turns a hung channel into a fast transient.
 async function attemptChat(base: string, key: string, model: string): Promise<ChatAttempt> {
   const { status, ok, body, latency, networkError } = await fetchJson(
     `${base}/v1/chat/completions`,
     {
       method: "POST",
-      headers: { ...authHeaders(key), "Content-Type": "application/json" },
+      headers: {
+        Authorization: `Bearer ${key}`,
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": PROBE_UA,
+      },
       body: JSON.stringify({ model, messages: [{ role: "user", content: "hi" }], max_tokens: 1, stream: false }),
     },
     10000,
@@ -557,29 +579,103 @@ async function attemptChat(base: string, key: string, model: string): Promise<Ch
   return { cls: "other", status, latency, error: error || "上游返回无有效补全", model }; // 200-no-choices / 400 / 404 → this model failed, try another
 }
 
-// Authoritative liveness probe. Walks the cheapest models, retrying transient
-// blips and falling back on model/channel errors (all 0-token), until either a
-// real completion succeeds (可用), the account is proven out of money (无额度), the
-// key is actively rejected (不可用), or the attempt budget is spent (不可用). A
-// non-success here is a GENUINE failure, not our own noise — so testKey can trust
-// it and never has to fall back to "能列模型就算可用".
+// The same probe against the Anthropic-native Messages shape: POST /v1/messages
+// with `x-api-key` + `anthropic-version` (we ALSO send `Authorization: Bearer`, as
+// New-API's /v1/messages accepts either). Many "claude" stations are pure
+// Anthropic proxies that only answer this path and 403 the OpenAI one, so a good
+// claude key needs this shape to be judged 可用. Anthropic requires `max_tokens`;
+// we send 1, so a genuine success still spends only ~2 tokens and any failure 0.
+async function attemptAnthropic(base: string, key: string, model: string): Promise<ChatAttempt> {
+  const { status, ok, body, latency, networkError } = await fetchJson(
+    `${base}/v1/messages`,
+    {
+      method: "POST",
+      headers: {
+        "x-api-key": key,
+        Authorization: `Bearer ${key}`,
+        "anthropic-version": "2023-06-01",
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": PROBE_UA,
+      },
+      body: JSON.stringify({ model, max_tokens: 1, messages: [{ role: "user", content: "hi" }] }),
+    },
+    10000,
+  );
+  const error = extractMsg(body, status);
+  if (networkError) return { cls: "transient", status: 0, latency: 0, error, model };
+
+  // An Anthropic Messages success is HTTP 200 with a `message` object (content[]).
+  // An error is HTTP-coded OR a {"type":"error"} body — never count that as 可用.
+  const hasCompletion =
+    ok && body && typeof body === "object" && body.type !== "error" && (Array.isArray(body.content) || body.type === "message");
+  if (hasCompletion) return { cls: "ok", status, latency, error: "", model };
+
+  if (status === 401) return { cls: "invalidKey", status, latency, error, model };
+  if (looksDrained(status, error)) return { cls: "drained", status, latency, error, model };
+  if (typeof body === "string" || status >= 500) return { cls: "transient", status, latency, error, model }; // HTML gateway page / 5xx / missing endpoint
+  if (looksModelIssue(error)) return { cls: "modelIssue", status, latency, error, model };
+  if (status === 403) return { cls: "invalidKey", status, latency, error, model };
+  return { cls: "other", status, latency, error: error || "上游返回无有效补全", model };
+}
+
+// An ordered (endpoint-shape, model) attempt. A "claude" group is very often an
+// Anthropic-NATIVE upstream that only answers POST /v1/messages and 403s the
+// OpenAI /v1/chat/completions path — the exact false-negative the operator hit
+// ("这个是可用的但显示不可用" with an "HTTP 403 非 JSON 页面" on a claude key). So for a
+// claude model we try the Anthropic shape FIRST, then the OpenAI-compat shape as
+// a fallback for relays that translate. Non-claude models only have the OpenAI shape.
+interface ProbeAttempt {
+  shape: "openai" | "anthropic";
+  model: string;
+}
+
+function pickProbeAttempts(models: string[], ratios: ModelRatio[], limit: number): ProbeAttempt[] {
+  const candidates = pickProbeModels(models, ratios, limit);
+  const specs: ProbeAttempt[] = [];
+  for (const model of candidates) {
+    if (modelFamily(model) === "claude") {
+      specs.push({ shape: "anthropic", model });
+      specs.push({ shape: "openai", model });
+    } else {
+      specs.push({ shape: "openai", model });
+    }
+  }
+  return specs;
+}
+
+// Authoritative liveness probe. Walks the cheapest models across BOTH endpoint
+// shapes (Anthropic /v1/messages for claude, OpenAI /v1/chat/completions
+// otherwise), retrying transient blips and falling back on model/channel errors
+// (all 0-token), until either a real completion succeeds (可用), the account is
+// proven out of money (无额度), the key is actively rejected (不可用), or the attempt
+// budget is spent (不可用). A single rejection can be endpoint/auth-scheme specific
+// (OpenAI Bearer vs Anthropic x-api-key), so it does NOT end the probe — only two
+// independent rejections (both shapes) prove the key dead. A non-success here is a
+// GENUINE failure, not our own noise — so testKey can trust it and never has to
+// fall back to "能列模型就算可用".
 async function probeChat(base: string, key: string, models: string[], ratios: ModelRatio[]): Promise<ProbeResult> {
-  const candidates = pickProbeModels(models, ratios, PROBE_MAX_MODELS);
+  const specs = pickProbeAttempts(models, ratios, PROBE_MAX_MODELS);
   let attempts = 0;
   let retriedTransient = false;
   let last: ChatAttempt | null = null;
+  let keyRejection: ChatAttempt | null = null;
+  let rejections = 0;
 
-  for (const model of candidates) {
+  const run = (spec: ProbeAttempt) =>
+    spec.shape === "anthropic" ? attemptAnthropic(base, key, spec.model) : attemptChat(base, key, spec.model);
+
+  for (const spec of specs) {
     if (attempts >= PROBE_MAX_ATTEMPTS) break;
     attempts++;
-    let a = await attemptChat(base, key, model);
+    let a = await run(spec);
     // One short-delayed retry for a transient blip — at most ONCE across the whole
     // probe, so a flaky edge doesn't fail a good key but we don't burn the budget.
     if (a.cls === "transient" && !retriedTransient && attempts < PROBE_MAX_ATTEMPTS) {
       retriedTransient = true;
       attempts++;
       await delay(PROBE_RETRY_DELAY_MS);
-      a = await attemptChat(base, key, model);
+      a = await run(spec);
     }
     last = a;
     if (a.cls === "ok") {
@@ -589,20 +685,27 @@ async function probeChat(base: string, key: string, models: string[], ratios: Mo
       return { status: a.status, ok: false, latency: a.latency, error: a.error, drained: true, invalidKey: false, model: a.model };
     }
     if (a.cls === "invalidKey") {
-      return { status: a.status, ok: false, latency: a.latency, error: a.error, drained: false, invalidKey: true, model: a.model };
+      keyRejection = a;
+      rejections++;
+      // One rejection may just mean this shape/endpoint doesn't accept the key's
+      // auth scheme; keep trying the other shape/models. Two rejections = the key
+      // is genuinely rejected — stop so a dead key can't burn the whole budget.
+      if (rejections >= 2) break;
     }
-    // modelIssue / transient / other → try the next cheapest model (0 tokens).
+    // modelIssue / transient / other / first-invalidKey → try the next spec (0 tokens).
   }
 
-  // Budget spent with no success and no definitive money/auth verdict → 不可用.
+  // No success. If a real request was actively rejected → 不可用 with that reason;
+  // otherwise the budget was spent on transient/model errors → 不可用.
+  const verdict = keyRejection ?? last;
   return {
-    status: last?.status ?? 0,
+    status: verdict?.status ?? 0,
     ok: false,
-    latency: last?.latency ?? 0,
-    error: last?.error || "真实请求测试未通过",
+    latency: verdict?.latency ?? 0,
+    error: verdict?.error || "真实请求测试未通过",
     drained: false,
-    invalidKey: false,
-    model: last?.model ?? candidates[0] ?? "gpt-4o-mini",
+    invalidKey: !!keyRejection,
+    model: verdict?.model ?? specs[0]?.model ?? "gpt-4o-mini",
   };
 }
 
