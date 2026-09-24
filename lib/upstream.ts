@@ -66,8 +66,23 @@ function ymd(d: Date): string {
 }
 
 function extractMsg(body: any, status: number): string {
-  const msg = (body && (body.error?.message || body.message || (typeof body === "string" ? body : null))) || `HTTP ${status}`;
-  return String(msg).slice(0, 300);
+  if (body && typeof body === "object") {
+    const err = typeof body.error === "string" ? body.error : body.error?.message;
+    const msg = err || body.message;
+    if (msg) return String(msg).slice(0, 300);
+  }
+  if (typeof body === "string") {
+    const s = body.trim();
+    // Non-JSON responses are gateway/error/challenge PAGES (Cloudflare 5xx or
+    // "checking your browser", nginx/origin errors, WAF blocks). Never surface
+    // the raw markup — summarise it so the key card shows a readable reason
+    // instead of a screenful of <!DOCTYPE html>…
+    if (s.startsWith("<") || /^\s*<!doctype/i.test(s)) {
+      return `上游返回了非 JSON 页面（HTTP ${status || "?"}，通常是网关错误/超时或防护拦截页）`;
+    }
+    if (s) return s.slice(0, 300);
+  }
+  return `HTTP ${status}`;
 }
 
 // ---- Liveness + accessible models via GET /v1/models -----------------------
@@ -179,7 +194,7 @@ async function fetchSub2ApiBilling(
 }
 
 // ---- Balance -----------------------------------------------------------------
-interface BalanceResult {
+export interface BalanceResult {
   balance_usd: number | null;
   total_usage_usd: number | null;
   raw: unknown;
@@ -393,16 +408,24 @@ interface ProbeResult {
   ok: boolean;
   latency: number;
   error: string | null;
-  drained: boolean; // failed specifically because the account is out of money
+  drained: boolean; // failed because the account is out of money → 无额度
+  invalidKey: boolean; // the station actively rejected THIS key → 不可用
   model: string;
 }
 
-// A drained account rejects a real request with 402, or an error message that
-// mentions balance/quota exhaustion. Distinguishing this from a truly dead key
-// lets us render 无额度 (key valid, no money) instead of 不可用.
+// A drained account rejects a real request with 402, or a message about balance/
+// quota exhaustion — surface as 无额度 (key valid, no money), NOT 不可用.
 function looksDrained(status: number, message: string): boolean {
   if (status === 402) return true;
-  return /insufficient|balance|余额|额度|欠费|欠款|用尽|不足|quota\s*exceed/i.test(message);
+  return /insufficient|balance|余额|额度|欠费|欠款|用尽|不足|quota\s*(exceeded|not enough)|no\s*quota/i.test(message);
+}
+
+// A failure that points at the MODEL/CHANNEL (not the key): "model not found",
+// "无可用渠道", "no permission for model". We picked the probe model ourselves,
+// so this is our bad pick or a per-model channel gap — it does NOT prove the key
+// is dead, so it must not fail the key.
+function looksModelIssue(message: string): boolean {
+  return /model|模型|渠道|channel|not found|does not exist|no permission|无权|无可用|unavailable/i.test(message);
 }
 
 async function probeChat(base: string, key: string, models: string[], ratios: ModelRatio[]): Promise<ProbeResult> {
@@ -414,11 +437,25 @@ async function probeChat(base: string, key: string, models: string[], ratios: Mo
       headers: { ...authHeaders(key), "Content-Type": "application/json" },
       body: JSON.stringify({ model, messages: [{ role: "user", content: "hi" }], max_tokens: 1, stream: false }),
     },
-    20000,
+    10000, // a "hi" with max_tokens:1 answers in ~1-3s on a healthy channel; keep
+    // the cap short so a slow/hung channel becomes "inconclusive" fast instead of
+    // stalling a whole 全部测活 into a gateway timeout.
   );
   const message = extractMsg(body, status);
-  if (networkError) return { status: 0, ok: false, latency: 0, error: message, drained: false, model };
-  return { status, ok, latency, error: ok ? null : message, drained: !ok && looksDrained(status, message), model };
+  if (networkError) {
+    // timeout / DNS / reset → inconclusive, never a key rejection.
+    return { status: 0, ok: false, latency: 0, error: message, drained: false, invalidKey: false, model };
+  }
+  if (ok) return { status, ok: true, latency, error: null, drained: false, invalidKey: false, model };
+
+  // A non-JSON body is a gateway/HTML/challenge PAGE, not the API's own auth
+  // rejection — treat as inconclusive (could be a transient 5xx / bot check), so
+  // a good key behind a flaky edge is never marked dead on it.
+  const nonJson = typeof body === "string";
+  const drained = looksDrained(status, message);
+  const invalidKey =
+    !drained && !nonJson && (status === 401 || status === 403) && !looksModelIssue(message);
+  return { status, ok: false, latency, error: message, drained, invalidKey, model };
 }
 
 // ---- Orchestrator ------------------------------------------------------------
@@ -428,29 +465,58 @@ export async function testKey(
   kind: SiteKind,
   groupName: string,
   accessToken = "",
+  opts: { balance?: BalanceResult | null } = {},
 ): Promise<TestResult> {
   const base = normalizeBase(baseUrl);
 
+  // Balance is account-level (one site = one upstream account). A site-wide 测活
+  // can fetch it ONCE and pass it in via opts.balance so we don't re-hit the
+  // billing endpoint per key — fewer Cloudflare subrequests per invocation.
   const [modelsRes, pricingRes, balanceRes] = await Promise.all([
     fetchModels(base, apiKey),
     fetchPricing(base, apiKey, kind, groupName, accessToken),
-    fetchBalance(base, apiKey, kind, accessToken),
+    opts.balance != null ? Promise.resolve(opts.balance) : fetchBalance(base, apiKey, kind, accessToken),
   ]);
 
-  // Authoritative liveness = a real chat request. We send the smallest possible
-  // completion (see probeChat) and judge on ITS result, because GET /v1/models
-  // answering 200 does NOT mean the key can actually complete a request — that
-  // was the exact "不能用了却还显示可用" bug. modelsRes/pricingRes still supply the
-  // model list, ratios and balance we report alongside it.
   const probe = await probeChat(base, apiKey, modelsRes.models, pricingRes.ratios);
 
-  // A drained account rejects even a VALID key (402 / "insufficient balance").
-  // That must surface as 无额度 (alive + balance≤0), not 不可用 — so a money-
-  // exhaustion failure, or a balance endpoint already reporting ≤0, counts as
-  // alive, and we pin the reported balance to 0 so keyState() renders 无额度.
+  // Liveness policy (least-surprising for a monitoring dashboard):
+  //   • a real completion succeeded             → 可用
+  //   • 402 / out-of-money / balance≤0          → 无额度 (alive, balance pinned to 0)
+  //   • the station REJECTED the key (401/403)  → 不可用 — the ONLY thing that
+  //     proves the KEY itself is dead. (The old "/v1/models 200 ⇒ 可用" was the
+  //     false-positive bug this replaced.)
+  //   • gateway 5xx / 超时 / 非 JSON 页 / 模型或渠道问题 → 结论不明:
+  //     do NOT flag the key dead on a transient / station-side error. Fall back
+  //     to whether the key can still authenticate & list models. This is why a
+  //     good key that momentarily hit a 502 / Cloudflare 页 / 超时 no longer flips
+  //     to 不可用 (the regression the operator just saw).
+  const modelsOk = modelsRes.status >= 200 && modelsRes.status < 300;
+  const modelsRejected = modelsRes.status === 401 || modelsRes.status === 403;
   const balanceSpent = balanceRes.balance_usd != null && balanceRes.balance_usd <= 0;
   const drained = probe.drained || balanceSpent;
-  const alive = probe.ok || drained;
+
+  let alive: boolean;
+  let reason: string | null;
+  if (probe.ok) {
+    alive = true;
+    reason = null;
+  } else if (drained) {
+    alive = true; // 无额度
+    reason = null;
+  } else if (probe.invalidKey) {
+    alive = false; // key actively rejected → genuinely 不可用
+    reason = probe.error;
+  } else if (modelsRejected) {
+    alive = false; // key rejected at /v1/models too
+    reason = modelsRes.error;
+  } else if (modelsOk) {
+    alive = true; // authenticates & lists models; the probe failure looks transient
+    reason = null;
+  } else {
+    alive = false; // neither a real request nor model listing worked →站点不可达
+    reason = probe.error || modelsRes.error;
+  }
 
   let balanceOut = balanceRes.balance_usd;
   if (drained && (balanceOut == null || balanceOut > 0)) balanceOut = 0;
@@ -459,7 +525,7 @@ export async function testKey(
     alive,
     latency_ms: probe.latency || modelsRes.latency || null,
     http_status: probe.status || modelsRes.status || null,
-    error: alive ? null : probe.error || modelsRes.error,
+    error: alive ? null : reason,
     group_ratio: pricingRes.groupRatio,
     model_ratios: pricingRes.ratios,
     models: modelsRes.models,
