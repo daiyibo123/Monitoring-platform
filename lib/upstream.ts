@@ -369,12 +369,15 @@ async function fetchBalance(base: string, key: string, kind: SiteKind, accessTok
 // To make that verdict both TRUTHFUL and COMPLETE — the operator's hard rule is a
 // key they can't actually use must NEVER show 可用, AND a good key must not be
 // failed on our own noise — the probe escalates at ZERO extra token cost:
-//   • try the cheapest model the station offers (see pickProbeModels);
+//   • try FAMILY-DIVERSE, cheapest-first models (see pickProbeModels) — so a key
+//     scoped to one family (claude/gemini/deepseek/…) still gets a model it can use;
 //   • a transient failure (超时 / 5xx / 网关或防护页) is retried once after a short
 //     delay, so a one-off blip doesn't fail a good key;
-//   • a model/channel failure falls back to the next cheapest model — the key may
+//   • a model/channel failure falls back to the next candidate model — the key may
 //     work with a different model;
-//   • the whole escalation is capped (PROBE_MAX_ATTEMPTS) to bound subrequests.
+//   • HTTP 200 only counts as 可用 if the body carries a real choices[] completion,
+//     so a 200-wrapped "无可用渠道" error can't masquerade as alive;
+//   • the whole escalation is capped (PROBE_MAX_MODELS / PROBE_MAX_ATTEMPTS) to bound subrequests.
 // Only a genuine SUCCESS generates tokens (~2, from a "hi" + max_tokens:1); every
 // failure returns an error WITHOUT a completion, so the retries/fallbacks cost 0
 // tokens and the minimum-token guarantee holds. Runs on the manual 测活 buttons
@@ -386,32 +389,100 @@ const PROBE_MODEL_PREFERENCES = [
   "gpt-4o-mini-2024-07-18",
   "deepseek-chat",
   "gemini-1.5-flash",
+  "gemini-2.0-flash",
+  "claude-3-haiku-20240307",
   "qwen-turbo",
+  "glm-4-flash",
+  "moonshot-v1-8k",
 ];
 
-// Ordered probe candidates, cheapest first: known dirt-cheap models the station
-// offers → models we have pricing for (lowest positive model_ratio first) → any
-// other advertised model. Deduped and capped. The probe walks this list on a
-// model/channel failure so one bad model can't wrongly fail an otherwise-good key.
+// Broad, family-diverse set used ONLY when the station advertises no models at all
+// (some New-API forks return an EMPTY /v1/models to an sk- token — the old code
+// then only ever probed "gpt-4o-mini", so ANY station lacking that one model
+// failed EVERY key). One cheap model per major family so a group scoped to any
+// single family (claude-only / gemini-only / deepseek-only …) still gets a probe.
+const FALLBACK_PROBE_MODELS = [
+  "gpt-4o-mini",
+  "gpt-3.5-turbo",
+  "gpt-4o",
+  "deepseek-chat",
+  "gemini-1.5-flash",
+  "claude-3-haiku-20240307",
+  "claude-3-5-sonnet-20241022",
+  "qwen-turbo",
+  "glm-4-flash",
+  "moonshot-v1-8k",
+];
+
+// Coarse model-family bucket from the model id, so probe candidates spread across
+// families instead of trying five OpenAI models and never the one Claude model the
+// key's group actually allows.
+function modelFamily(model: string): string {
+  const m = model.toLowerCase();
+  if (m.includes("claude")) return "claude";
+  if (m.includes("gemini") || m.includes("gemma")) return "gemini";
+  if (m.includes("deepseek")) return "deepseek";
+  if (m.includes("qwen") || m.includes("qwq")) return "qwen";
+  if (m.includes("glm") || m.includes("chatglm")) return "glm";
+  if (m.includes("moonshot") || m.includes("kimi")) return "moonshot";
+  if (m.includes("grok")) return "grok";
+  if (m.includes("llama")) return "llama";
+  if (m.includes("mistral") || m.includes("mixtral")) return "mistral";
+  if (m.includes("ernie") || m.includes("doubao") || m.includes("hunyuan") || m.includes("spark") || m.includes("yi-") || m.includes("abab") || m.includes("step-")) return "cn-other";
+  if (m.includes("gpt") || m.startsWith("o1") || m.startsWith("o3") || m.startsWith("o4") || m.includes("chatgpt") || m.includes("text-")) return "openai";
+  return "other";
+}
+
+// Ordered probe candidates. We must find a model the KEY can actually use, so we
+// pick FAMILY-DIVERSE, cheapest-first. The false-negative that made good keys show
+// 不可用 was picking only the 3 cheapest (often all one family, none in the key's
+// group) or — when /v1/models came back empty — only "gpt-4o-mini". Now each family
+// is ranked cheapest-first and we round-robin one model per family, so even a small
+// budget covers whatever family the key is scoped to.
 function pickProbeModels(models: string[], ratios: ModelRatio[], limit: number): string[] {
-  const available = models.length ? models : ratios.map((r) => r.model).filter(Boolean);
-  const ranked: string[] = [];
-  const seen = new Set<string>();
-  const push = (m: string | null | undefined) => {
-    if (!m || seen.has(m)) return;
-    seen.add(m);
-    ranked.push(m);
-  };
-  for (const pref of PROBE_MODEL_PREFERENCES) {
-    if (available.includes(pref)) push(pref);
+  const advertised = models.length ? models : ratios.map((r) => r.model).filter(Boolean);
+  const pool = Array.from(new Set(advertised.length ? advertised : FALLBACK_PROBE_MODELS));
+
+  const ratioOf = new Map<string, number>();
+  for (const r of ratios) {
+    if (r.model && typeof r.model_ratio === "number" && r.model_ratio > 0 && !ratioOf.has(r.model)) {
+      ratioOf.set(r.model, r.model_ratio);
+    }
   }
-  const priced = ratios
-    .filter((r) => r.model && (!available.length || available.includes(r.model)))
-    .map((r) => ({ model: r.model, ratio: typeof r.model_ratio === "number" ? r.model_ratio : null }))
-    .filter((r) => r.ratio != null && (r.ratio as number) > 0)
-    .sort((a, b) => (a.ratio as number) - (b.ratio as number));
-  for (const r of priced) push(r.model);
-  for (const m of available) push(m);
+  const prefRank = new Map(PROBE_MODEL_PREFERENCES.map((m, i) => [m, i] as const));
+  // Lower = cheaper / more preferred: known dirt-cheap names first, then priced
+  // models by ratio, then names that merely LOOK cheap (mini/flash/turbo/…), rest last.
+  const cheapness = (m: string): number => {
+    const pref = prefRank.get(m);
+    if (pref != null) return -1000 + pref;
+    const r = ratioOf.get(m);
+    if (r != null) return r;
+    if (/mini|flash|lite|nano|small|turbo|8k|tiny|air|instant|haiku|fast|micro|free/i.test(m)) return 100;
+    return 1000;
+  };
+
+  const byFamily = new Map<string, string[]>();
+  for (const m of pool) {
+    const arr = byFamily.get(modelFamily(m));
+    if (arr) arr.push(m);
+    else byFamily.set(modelFamily(m), [m]);
+  }
+  for (const arr of byFamily.values()) arr.sort((a, b) => cheapness(a) - cheapness(b));
+  // Families ordered by their cheapest member, then round-robin across them.
+  const families = Array.from(byFamily.values()).sort((a, b) => cheapness(a[0]) - cheapness(b[0]));
+
+  const ranked: string[] = [];
+  for (let depth = 0; ranked.length < limit; depth++) {
+    let advanced = false;
+    for (const arr of families) {
+      if (depth < arr.length) {
+        ranked.push(arr[depth]);
+        advanced = true;
+        if (ranked.length >= limit) break;
+      }
+    }
+    if (!advanced) break;
+  }
   if (!ranked.length) ranked.push("gpt-4o-mini");
   return ranked.slice(0, Math.max(1, limit));
 }
@@ -441,7 +512,8 @@ function looksModelIssue(message: string): boolean {
   return /model|模型|渠道|channel|not found|does not exist|no permission|无权|无可用|unavailable/i.test(message);
 }
 
-const PROBE_MAX_ATTEMPTS = 3; // total completion calls per key — bounds subrequests & latency
+const PROBE_MAX_MODELS = 5; // distinct models to try, family-diverse & cheapest-first
+const PROBE_MAX_ATTEMPTS = 6; // hard cap on completion calls per key (models + one transient retry) — bounds subrequests & latency
 const PROBE_RETRY_DELAY_MS = 600;
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -468,14 +540,21 @@ async function attemptChat(base: string, key: string, model: string): Promise<Ch
   );
   const error = extractMsg(body, status);
   if (networkError) return { cls: "transient", status: 0, latency: 0, error, model }; // 超时/DNS/reset
-  if (ok) return { cls: "ok", status, latency, error: "", model };
+
+  // A real OpenAI-compatible completion (stream:false) ALWAYS carries a non-empty
+  // choices[] array. Some relays answer HTTP 200 with an ERROR body ("无可用渠道"),
+  // so requiring choices[] here is what keeps a 200-wrapped error from showing 可用.
+  const hasCompletion = ok && body && typeof body === "object" && Array.isArray(body.choices) && body.choices.length > 0;
+  if (hasCompletion) return { cls: "ok", status, latency, error: "", model };
+
+  if (status === 401) return { cls: "invalidKey", status, latency, error, model }; // unauthenticated → key dead
   if (looksDrained(status, error)) return { cls: "drained", status, latency, error, model }; // 402/余额
   // A non-JSON body is a gateway/HTML/challenge PAGE, and any 5xx is a station-
   // side hiccup — both are transient, retry-able, never a key rejection.
   if (typeof body === "string" || status >= 500) return { cls: "transient", status, latency, error, model };
-  if (looksModelIssue(error)) return { cls: "modelIssue", status, latency, error, model }; // our model pick, not the key
-  if (status === 401 || status === 403) return { cls: "invalidKey", status, latency, error, model }; // key rejected
-  return { cls: "other", status, latency, error, model }; // 400/404/… — this model failed
+  if (looksModelIssue(error)) return { cls: "modelIssue", status, latency, error, model }; // our model pick, not the key — try another
+  if (status === 403) return { cls: "invalidKey", status, latency, error, model }; // forbidden & not model-related → key dead
+  return { cls: "other", status, latency, error: error || "上游返回无有效补全", model }; // 200-no-choices / 400 / 404 → this model failed, try another
 }
 
 // Authoritative liveness probe. Walks the cheapest models, retrying transient
@@ -485,16 +564,19 @@ async function attemptChat(base: string, key: string, model: string): Promise<Ch
 // non-success here is a GENUINE failure, not our own noise — so testKey can trust
 // it and never has to fall back to "能列模型就算可用".
 async function probeChat(base: string, key: string, models: string[], ratios: ModelRatio[]): Promise<ProbeResult> {
-  const candidates = pickProbeModels(models, ratios, PROBE_MAX_ATTEMPTS);
+  const candidates = pickProbeModels(models, ratios, PROBE_MAX_MODELS);
   let attempts = 0;
+  let retriedTransient = false;
   let last: ChatAttempt | null = null;
 
   for (const model of candidates) {
     if (attempts >= PROBE_MAX_ATTEMPTS) break;
     attempts++;
     let a = await attemptChat(base, key, model);
-    // One short-delayed retry for a transient blip, if the budget allows.
-    if (a.cls === "transient" && attempts < PROBE_MAX_ATTEMPTS) {
+    // One short-delayed retry for a transient blip — at most ONCE across the whole
+    // probe, so a flaky edge doesn't fail a good key but we don't burn the budget.
+    if (a.cls === "transient" && !retriedTransient && attempts < PROBE_MAX_ATTEMPTS) {
+      retriedTransient = true;
       attempts++;
       await delay(PROBE_RETRY_DELAY_MS);
       a = await attemptChat(base, key, model);
