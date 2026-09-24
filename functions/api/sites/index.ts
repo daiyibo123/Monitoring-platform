@@ -1,11 +1,24 @@
+import { claimDailyAutoTest, runDailyAutoTest } from "../../../lib/autotest";
 import { loadSitesWithKeys } from "../../../lib/db";
 import { fail, ok, readJson } from "../../../lib/http";
 import type { Env, SiteKind } from "../../../lib/types";
 
 const KINDS: SiteKind[] = ["newapi", "sub2api", "openai"];
 
-export const onRequestGet: PagesFunction<Env> = async ({ env }) => {
+export const onRequestGet: PagesFunction<Env> = async ({ env, waitUntil }) => {
   const sites = await loadSitesWithKeys(env);
+
+  // Daily auto-测活: the FIRST dashboard open of each (China) day kicks off ONE
+  // full liveness sweep; every other open that day is a no-op. The frontend
+  // can't be rebuilt here, so we hook the endpoint it ALREADY calls on entry
+  // (GET /api/sites) instead of adding a client trigger. The sweep runs via
+  // waitUntil so the page load never waits on it — fresh statuses land in the DB
+  // and show on the next load/refresh. Manual 测活 buttons are unaffected, and
+  // the sweep uses the same minimum-token probe (~2 tokens per working key).
+  if (await claimDailyAutoTest(env)) {
+    waitUntil(runDailyAutoTest(env));
+  }
+
   return ok(sites);
 };
 

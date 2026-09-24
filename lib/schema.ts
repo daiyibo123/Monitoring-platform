@@ -44,6 +44,13 @@ const DDL = [
     tested_at INTEGER,
     FOREIGN KEY (key_id) REFERENCES api_keys(id) ON DELETE CASCADE
   )`,
+  // Small key/value store for app-level state. Currently holds
+  // "auto_test_date" — the last (China-time) day the daily auto-测活 ran, used to
+  // guarantee the sweep fires at most once per day. See lib/autotest.ts.
+  `CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT
+  )`,
 ];
 
 // Columns added after the initial release. `CREATE TABLE IF NOT EXISTS` never
