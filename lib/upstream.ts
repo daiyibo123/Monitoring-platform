@@ -344,6 +344,83 @@ async function fetchBalance(base: string, key: string, kind: SiteKind, accessTok
   return fetchOpenAiBalance(base, key);
 }
 
+// ---- Real-request liveness probe: POST /v1/chat/completions ----------------
+// GET /v1/models only proves the station will LIST models — most relays answer
+// 200 there even when the key/group has no usable channel, the account is out
+// of money, or the key is restricted. So "能列模型" ≠ "能发请求", which is why a
+// dead key still showed 可用. To match what actually happens when you use the
+// key, we send the smallest possible REAL chat request and judge on its status.
+//
+// Token cost is kept minimal on purpose:
+//   • only run on a MANUAL 测活 (never on the login balance auto-refresh);
+//   • pick the cheapest model the station offers (see pickProbeModel);
+//   • one-token prompt ("hi") + max_tokens:1 → ~2 tokens on success;
+//   • every failure mode (401/402/403/404/5xx/超时) returns an error WITHOUT
+//     generating anything, so it costs 0 tokens — we only ever spend on a key
+//     that genuinely works.
+const PROBE_MODEL_PREFERENCES = [
+  "gpt-4o-mini",
+  "gpt-4.1-mini",
+  "gpt-3.5-turbo",
+  "gpt-4o-mini-2024-07-18",
+  "deepseek-chat",
+  "gemini-1.5-flash",
+  "qwen-turbo",
+];
+
+// Choose the cheapest model to probe with: a known dirt-cheap model if offered,
+// else the lowest positive model_ratio we have pricing for, else the first
+// advertised model. Using a model the station itself lists/prices keeps the
+// probe representative (a real "no available channel" is a genuine 不可用).
+function pickProbeModel(models: string[], ratios: ModelRatio[]): string {
+  const available = models.length ? models : ratios.map((r) => r.model).filter(Boolean);
+  for (const pref of PROBE_MODEL_PREFERENCES) {
+    if (available.includes(pref)) return pref;
+  }
+  let best: { model: string; ratio: number } | null = null;
+  for (const r of ratios) {
+    if (!r.model || (available.length && !available.includes(r.model))) continue;
+    const ratio = typeof r.model_ratio === "number" ? r.model_ratio : null;
+    if (ratio == null || ratio <= 0) continue;
+    if (!best || ratio < best.ratio) best = { model: r.model, ratio };
+  }
+  if (best) return best.model;
+  return available[0] || "gpt-4o-mini";
+}
+
+interface ProbeResult {
+  status: number;
+  ok: boolean;
+  latency: number;
+  error: string | null;
+  drained: boolean; // failed specifically because the account is out of money
+  model: string;
+}
+
+// A drained account rejects a real request with 402, or an error message that
+// mentions balance/quota exhaustion. Distinguishing this from a truly dead key
+// lets us render 无额度 (key valid, no money) instead of 不可用.
+function looksDrained(status: number, message: string): boolean {
+  if (status === 402) return true;
+  return /insufficient|balance|余额|额度|欠费|欠款|用尽|不足|quota\s*exceed/i.test(message);
+}
+
+async function probeChat(base: string, key: string, models: string[], ratios: ModelRatio[]): Promise<ProbeResult> {
+  const model = pickProbeModel(models, ratios);
+  const { status, ok, body, latency, networkError } = await fetchJson(
+    `${base}/v1/chat/completions`,
+    {
+      method: "POST",
+      headers: { ...authHeaders(key), "Content-Type": "application/json" },
+      body: JSON.stringify({ model, messages: [{ role: "user", content: "hi" }], max_tokens: 1, stream: false }),
+    },
+    20000,
+  );
+  const message = extractMsg(body, status);
+  if (networkError) return { status: 0, ok: false, latency: 0, error: message, drained: false, model };
+  return { status, ok, latency, error: ok ? null : message, drained: !ok && looksDrained(status, message), model };
+}
+
 // ---- Orchestrator ------------------------------------------------------------
 export async function testKey(
   baseUrl: string,
@@ -360,40 +437,33 @@ export async function testKey(
     fetchBalance(base, apiKey, kind, accessToken),
   ]);
 
-  // A 401/403 on GET /v1/models normally means THIS sk- key was rejected →
-  // authoritatively dead, and NOT overridden by a reachable pricing/balance
-  // endpoint (on New-API those authenticate with the site ACCESS TOKEN, so they
-  // answer even for a rejected key — the reported "无效 key 却显示可用" bug).
-  //
-  // EXCEPTION: when the upstream account is out of money, New-API rejects even a
-  // VALID key here with "insufficient account balance". That must surface as
-  // 无额度 (alive + balance≤0), not 不可用. So if the balance endpoint confirms the
-  // account is drained, keep the key alive and let keyState() render 无额度.
-  //
-  // Only when the key was NOT rejected do we fall back to "可达即可用": the station
-  // counts as alive if any authed endpoint answered without an auth failure — that
-  // keeps a valid key alive when /v1/models happens to 404/405 on the station.
-  const modelsOk = modelsRes.status >= 200 && modelsRes.status < 300;
-  const modelsRejected = modelsRes.status === 401 || modelsRes.status === 403;
+  // Authoritative liveness = a real chat request. We send the smallest possible
+  // completion (see probeChat) and judge on ITS result, because GET /v1/models
+  // answering 200 does NOT mean the key can actually complete a request — that
+  // was the exact "不能用了却还显示可用" bug. modelsRes/pricingRes still supply the
+  // model list, ratios and balance we report alongside it.
+  const probe = await probeChat(base, apiKey, modelsRes.models, pricingRes.ratios);
+
+  // A drained account rejects even a VALID key (402 / "insufficient balance").
+  // That must surface as 无额度 (alive + balance≤0), not 不可用 — so a money-
+  // exhaustion failure, or a balance endpoint already reporting ≤0, counts as
+  // alive, and we pin the reported balance to 0 so keyState() renders 无额度.
   const balanceSpent = balanceRes.balance_usd != null && balanceRes.balance_usd <= 0;
-  let alive: boolean;
-  if (modelsOk) {
-    alive = true;
-  } else if (modelsRejected) {
-    alive = balanceSpent; // drained account → 无额度; otherwise a genuinely bad key → 不可用
-  } else {
-    alive = modelsRes.reachable || pricingRes.reachable || balanceRes.reachable;
-  }
+  const drained = probe.drained || balanceSpent;
+  const alive = probe.ok || drained;
+
+  let balanceOut = balanceRes.balance_usd;
+  if (drained && (balanceOut == null || balanceOut > 0)) balanceOut = 0;
 
   return {
     alive,
-    latency_ms: modelsRes.latency || null,
-    http_status: modelsRes.status || null,
-    error: alive ? null : modelsRes.error,
+    latency_ms: probe.latency || modelsRes.latency || null,
+    http_status: probe.status || modelsRes.status || null,
+    error: alive ? null : probe.error || modelsRes.error,
     group_ratio: pricingRes.groupRatio,
     model_ratios: pricingRes.ratios,
     models: modelsRes.models,
-    balance_usd: balanceRes.balance_usd,
+    balance_usd: balanceOut,
     total_usage_usd: balanceRes.total_usage_usd,
     balance_raw: balanceRes.raw,
     pricing_source: pricingRes.source,
