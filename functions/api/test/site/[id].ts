@@ -3,7 +3,28 @@ import { fail, ok } from "../../../../lib/http";
 import type { ApiKey, Env, Site } from "../../../../lib/types";
 import { refreshBalance, testKey, type BalanceResult } from "../../../../lib/upstream";
 
-// Test every key under a site concurrently, then persist each result.
+// Test keys under a site with BOUNDED concurrency, then persist each result.
+// Each testKey fires several subrequests (models + pricing + the real chat probe,
+// which may itself retry), so an unbounded Promise.all over many keys opens a big
+// simultaneous burst that trips Cloudflare's ~6-connection limit and makes good
+// keys spuriously time out — the 全部测活 误判/超时 the operator hit. A small pool
+// keeps concurrency sane while still finishing well inside the ~100s client
+// window. (The once-daily auto sweep in lib/autotest.ts runs fully serial since
+// nothing is waiting on it.)
+const SITE_TEST_CONCURRENCY = 3;
+
+async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out: R[] = new Array(items.length);
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < items.length) {
+      const idx = cursor++;
+      out[idx] = await fn(items[idx]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
+}
 export const onRequestPost: PagesFunction<Env> = async ({ env, params }) => {
   const id = Number(params.id);
   if (!Number.isFinite(id)) return fail("无效的网站 ID");
@@ -32,15 +53,13 @@ export const onRequestPost: PagesFunction<Env> = async ({ env, params }) => {
     }
   }
 
-  const results = await Promise.all(
-    list.map(async (key) => {
-      const result = await testKey(site.base_url, key.api_key, site.kind, key.group_name, site.access_token, {
-        balance: siteBalance,
-      });
-      await saveTestResult(env, key.id, result);
-      return { key_id: key.id, result };
-    }),
-  );
+  const results = await mapLimit(list, SITE_TEST_CONCURRENCY, async (key) => {
+    const result = await testKey(site.base_url, key.api_key, site.kind, key.group_name, site.access_token, {
+      balance: siteBalance,
+    });
+    await saveTestResult(env, key.id, result);
+    return { key_id: key.id, result };
+  });
 
   return ok({ site_id: id, results });
 };

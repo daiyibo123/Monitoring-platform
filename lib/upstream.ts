@@ -362,17 +362,23 @@ async function fetchBalance(base: string, key: string, kind: SiteKind, accessTok
 // ---- Real-request liveness probe: POST /v1/chat/completions ----------------
 // GET /v1/models only proves the station will LIST models — most relays answer
 // 200 there even when the key/group has no usable channel, the account is out
-// of money, or the key is restricted. So "能列模型" ≠ "能发请求", which is why a
-// dead key still showed 可用. To match what actually happens when you use the
-// key, we send the smallest possible REAL chat request and judge on its status.
+// of money, or the key is restricted. So "能列模型" ≠ "能发请求". The verdict is
+// therefore decided by a REAL chat request and nothing else: 可用 means a genuine
+// completion actually came back.
 //
-// Token cost is kept minimal on purpose:
-//   • only run on a MANUAL 测活 (never on the login balance auto-refresh);
-//   • pick the cheapest model the station offers (see pickProbeModel);
-//   • one-token prompt ("hi") + max_tokens:1 → ~2 tokens on success;
-//   • every failure mode (401/402/403/404/5xx/超时) returns an error WITHOUT
-//     generating anything, so it costs 0 tokens — we only ever spend on a key
-//     that genuinely works.
+// To make that verdict both TRUTHFUL and COMPLETE — the operator's hard rule is a
+// key they can't actually use must NEVER show 可用, AND a good key must not be
+// failed on our own noise — the probe escalates at ZERO extra token cost:
+//   • try the cheapest model the station offers (see pickProbeModels);
+//   • a transient failure (超时 / 5xx / 网关或防护页) is retried once after a short
+//     delay, so a one-off blip doesn't fail a good key;
+//   • a model/channel failure falls back to the next cheapest model — the key may
+//     work with a different model;
+//   • the whole escalation is capped (PROBE_MAX_ATTEMPTS) to bound subrequests.
+// Only a genuine SUCCESS generates tokens (~2, from a "hi" + max_tokens:1); every
+// failure returns an error WITHOUT a completion, so the retries/fallbacks cost 0
+// tokens and the minimum-token guarantee holds. Runs on the manual 测活 buttons
+// and on the once-per-day auto sweep (lib/autotest.ts); never on balance refresh.
 const PROBE_MODEL_PREFERENCES = [
   "gpt-4o-mini",
   "gpt-4.1-mini",
@@ -383,24 +389,31 @@ const PROBE_MODEL_PREFERENCES = [
   "qwen-turbo",
 ];
 
-// Choose the cheapest model to probe with: a known dirt-cheap model if offered,
-// else the lowest positive model_ratio we have pricing for, else the first
-// advertised model. Using a model the station itself lists/prices keeps the
-// probe representative (a real "no available channel" is a genuine 不可用).
-function pickProbeModel(models: string[], ratios: ModelRatio[]): string {
+// Ordered probe candidates, cheapest first: known dirt-cheap models the station
+// offers → models we have pricing for (lowest positive model_ratio first) → any
+// other advertised model. Deduped and capped. The probe walks this list on a
+// model/channel failure so one bad model can't wrongly fail an otherwise-good key.
+function pickProbeModels(models: string[], ratios: ModelRatio[], limit: number): string[] {
   const available = models.length ? models : ratios.map((r) => r.model).filter(Boolean);
+  const ranked: string[] = [];
+  const seen = new Set<string>();
+  const push = (m: string | null | undefined) => {
+    if (!m || seen.has(m)) return;
+    seen.add(m);
+    ranked.push(m);
+  };
   for (const pref of PROBE_MODEL_PREFERENCES) {
-    if (available.includes(pref)) return pref;
+    if (available.includes(pref)) push(pref);
   }
-  let best: { model: string; ratio: number } | null = null;
-  for (const r of ratios) {
-    if (!r.model || (available.length && !available.includes(r.model))) continue;
-    const ratio = typeof r.model_ratio === "number" ? r.model_ratio : null;
-    if (ratio == null || ratio <= 0) continue;
-    if (!best || ratio < best.ratio) best = { model: r.model, ratio };
-  }
-  if (best) return best.model;
-  return available[0] || "gpt-4o-mini";
+  const priced = ratios
+    .filter((r) => r.model && (!available.length || available.includes(r.model)))
+    .map((r) => ({ model: r.model, ratio: typeof r.model_ratio === "number" ? r.model_ratio : null }))
+    .filter((r) => r.ratio != null && (r.ratio as number) > 0)
+    .sort((a, b) => (a.ratio as number) - (b.ratio as number));
+  for (const r of priced) push(r.model);
+  for (const m of available) push(m);
+  if (!ranked.length) ranked.push("gpt-4o-mini");
+  return ranked.slice(0, Math.max(1, limit));
 }
 
 interface ProbeResult {
@@ -428,8 +441,22 @@ function looksModelIssue(message: string): boolean {
   return /model|模型|渠道|channel|not found|does not exist|no permission|无权|无可用|unavailable/i.test(message);
 }
 
-async function probeChat(base: string, key: string, models: string[], ratios: ModelRatio[]): Promise<ProbeResult> {
-  const model = pickProbeModel(models, ratios);
+const PROBE_MAX_ATTEMPTS = 3; // total completion calls per key — bounds subrequests & latency
+const PROBE_RETRY_DELAY_MS = 600;
+const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+type AttemptClass = "ok" | "drained" | "invalidKey" | "modelIssue" | "transient" | "other";
+interface ChatAttempt {
+  cls: AttemptClass;
+  status: number;
+  latency: number;
+  error: string;
+  model: string;
+}
+
+// One real completion call, classified. A "hi" + max_tokens:1 answers in ~1-3s on
+// a healthy channel; the 10s cap turns a hung channel into a fast transient.
+async function attemptChat(base: string, key: string, model: string): Promise<ChatAttempt> {
   const { status, ok, body, latency, networkError } = await fetchJson(
     `${base}/v1/chat/completions`,
     {
@@ -437,25 +464,64 @@ async function probeChat(base: string, key: string, models: string[], ratios: Mo
       headers: { ...authHeaders(key), "Content-Type": "application/json" },
       body: JSON.stringify({ model, messages: [{ role: "user", content: "hi" }], max_tokens: 1, stream: false }),
     },
-    10000, // a "hi" with max_tokens:1 answers in ~1-3s on a healthy channel; keep
-    // the cap short so a slow/hung channel becomes "inconclusive" fast instead of
-    // stalling a whole 全部测活 into a gateway timeout.
+    10000,
   );
-  const message = extractMsg(body, status);
-  if (networkError) {
-    // timeout / DNS / reset → inconclusive, never a key rejection.
-    return { status: 0, ok: false, latency: 0, error: message, drained: false, invalidKey: false, model };
-  }
-  if (ok) return { status, ok: true, latency, error: null, drained: false, invalidKey: false, model };
+  const error = extractMsg(body, status);
+  if (networkError) return { cls: "transient", status: 0, latency: 0, error, model }; // 超时/DNS/reset
+  if (ok) return { cls: "ok", status, latency, error: "", model };
+  if (looksDrained(status, error)) return { cls: "drained", status, latency, error, model }; // 402/余额
+  // A non-JSON body is a gateway/HTML/challenge PAGE, and any 5xx is a station-
+  // side hiccup — both are transient, retry-able, never a key rejection.
+  if (typeof body === "string" || status >= 500) return { cls: "transient", status, latency, error, model };
+  if (looksModelIssue(error)) return { cls: "modelIssue", status, latency, error, model }; // our model pick, not the key
+  if (status === 401 || status === 403) return { cls: "invalidKey", status, latency, error, model }; // key rejected
+  return { cls: "other", status, latency, error, model }; // 400/404/… — this model failed
+}
 
-  // A non-JSON body is a gateway/HTML/challenge PAGE, not the API's own auth
-  // rejection — treat as inconclusive (could be a transient 5xx / bot check), so
-  // a good key behind a flaky edge is never marked dead on it.
-  const nonJson = typeof body === "string";
-  const drained = looksDrained(status, message);
-  const invalidKey =
-    !drained && !nonJson && (status === 401 || status === 403) && !looksModelIssue(message);
-  return { status, ok: false, latency, error: message, drained, invalidKey, model };
+// Authoritative liveness probe. Walks the cheapest models, retrying transient
+// blips and falling back on model/channel errors (all 0-token), until either a
+// real completion succeeds (可用), the account is proven out of money (无额度), the
+// key is actively rejected (不可用), or the attempt budget is spent (不可用). A
+// non-success here is a GENUINE failure, not our own noise — so testKey can trust
+// it and never has to fall back to "能列模型就算可用".
+async function probeChat(base: string, key: string, models: string[], ratios: ModelRatio[]): Promise<ProbeResult> {
+  const candidates = pickProbeModels(models, ratios, PROBE_MAX_ATTEMPTS);
+  let attempts = 0;
+  let last: ChatAttempt | null = null;
+
+  for (const model of candidates) {
+    if (attempts >= PROBE_MAX_ATTEMPTS) break;
+    attempts++;
+    let a = await attemptChat(base, key, model);
+    // One short-delayed retry for a transient blip, if the budget allows.
+    if (a.cls === "transient" && attempts < PROBE_MAX_ATTEMPTS) {
+      attempts++;
+      await delay(PROBE_RETRY_DELAY_MS);
+      a = await attemptChat(base, key, model);
+    }
+    last = a;
+    if (a.cls === "ok") {
+      return { status: a.status, ok: true, latency: a.latency, error: null, drained: false, invalidKey: false, model: a.model };
+    }
+    if (a.cls === "drained") {
+      return { status: a.status, ok: false, latency: a.latency, error: a.error, drained: true, invalidKey: false, model: a.model };
+    }
+    if (a.cls === "invalidKey") {
+      return { status: a.status, ok: false, latency: a.latency, error: a.error, drained: false, invalidKey: true, model: a.model };
+    }
+    // modelIssue / transient / other → try the next cheapest model (0 tokens).
+  }
+
+  // Budget spent with no success and no definitive money/auth verdict → 不可用.
+  return {
+    status: last?.status ?? 0,
+    ok: false,
+    latency: last?.latency ?? 0,
+    error: last?.error || "真实请求测试未通过",
+    drained: false,
+    invalidKey: false,
+    model: last?.model ?? candidates[0] ?? "gpt-4o-mini",
+  };
 }
 
 // ---- Orchestrator ------------------------------------------------------------
@@ -480,19 +546,14 @@ export async function testKey(
 
   const probe = await probeChat(base, apiKey, modelsRes.models, pricingRes.ratios);
 
-  // Liveness policy (least-surprising for a monitoring dashboard):
-  //   • a real completion succeeded             → 可用
-  //   • 402 / out-of-money / balance≤0          → 无额度 (alive, balance pinned to 0)
-  //   • the station REJECTED the key (401/403)  → 不可用 — the ONLY thing that
-  //     proves the KEY itself is dead. (The old "/v1/models 200 ⇒ 可用" was the
-  //     false-positive bug this replaced.)
-  //   • gateway 5xx / 超时 / 非 JSON 页 / 模型或渠道问题 → 结论不明:
-  //     do NOT flag the key dead on a transient / station-side error. Fall back
-  //     to whether the key can still authenticate & list models. This is why a
-  //     good key that momentarily hit a 502 / Cloudflare 页 / 超时 no longer flips
-  //     to 不可用 (the regression the operator just saw).
-  const modelsOk = modelsRes.status >= 200 && modelsRes.status < 300;
-  const modelsRejected = modelsRes.status === 401 || modelsRes.status === 403;
+  // TRUTHFUL liveness — the operator's hard rule: a key they can't actually use
+  // must NEVER show 可用. So the REAL completion probe is authoritative and there
+  // is NO "能列模型就算可用" fallback (that was the false-positive path). probeChat
+  // has already retried transient blips and tried the key's other cheap models
+  // (all at 0 token cost), so a non-success is a genuine failure we can trust:
+  //   • real completion succeeded      → 可用
+  //   • 402 / out-of-money / balance≤0 → 无额度 (alive, balance pinned to 0)
+  //   • anything else (key rejected, 超时, 网关/防护页, 无可用渠道) → 不可用
   const balanceSpent = balanceRes.balance_usd != null && balanceRes.balance_usd <= 0;
   const drained = probe.drained || balanceSpent;
 
@@ -504,17 +565,8 @@ export async function testKey(
   } else if (drained) {
     alive = true; // 无额度
     reason = null;
-  } else if (probe.invalidKey) {
-    alive = false; // key actively rejected → genuinely 不可用
-    reason = probe.error;
-  } else if (modelsRejected) {
-    alive = false; // key rejected at /v1/models too
-    reason = modelsRes.error;
-  } else if (modelsOk) {
-    alive = true; // authenticates & lists models; the probe failure looks transient
-    reason = null;
   } else {
-    alive = false; // neither a real request nor model listing worked →站点不可达
+    alive = false; // real request did not succeed → genuinely 不可用
     reason = probe.error || modelsRes.error;
   }
 
