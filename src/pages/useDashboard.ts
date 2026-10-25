@@ -121,27 +121,44 @@ export function useDashboard(onLogout: () => void) {
       list.forEach((id) => busyRef.current.add(id));
       setQueued((prev) => new Set([...prev, ...list]));
       setRun({ label, total: list.length, done: 0 });
+      const testOneOf = async (id: number) => {
+        toggle(setQueued, id, false);
+        toggle(setTesting, id, true);
+        try {
+          const r = await api.testKey(id, auto);
+          if (r.skipped) tally.skipped++;
+          else {
+            applyTest(r);
+            tally[r.status?.state ?? "failed"]++;
+          }
+        } catch (err) {
+          tally.failed++;
+          if (err instanceof UnauthorizedError) fail(err, "");
+        } finally {
+          busyRef.current.delete(id);
+          toggle(setTesting, id, false);
+          setRun((p) => (p ? { ...p, done: p.done + 1 } : p));
+        }
+      };
+      // One key at a time per site (sites in parallel): keys of one site share
+      // an upstream account, and parallel requests trip its concurrency / rate
+      // limits — a working key then looks broken. Real use is one at a time too.
+      const siteOf = new Map(sitesRef.current.flatMap((s) => s.keys.map((k) => [k.id, s.id] as const)));
+      const groups = new Map<number, number[]>();
+      for (const id of list) {
+        const sid = siteOf.get(id) ?? -id;
+        const g = groups.get(sid);
+        if (g) g.push(id);
+        else groups.set(sid, [id]);
+      }
       try {
         await runPool(
-          list,
+          [...groups.values()],
           TEST_CONCURRENCY,
-          async (id) => {
-            toggle(setQueued, id, false);
-            toggle(setTesting, id, true);
-            try {
-              const r = await api.testKey(id, auto);
-              if (r.skipped) tally.skipped++;
-              else {
-                applyTest(r);
-                tally[r.status?.state ?? "failed"]++;
-              }
-            } catch (err) {
-              tally.failed++;
-              if (err instanceof UnauthorizedError) fail(err, "");
-            } finally {
-              busyRef.current.delete(id);
-              toggle(setTesting, id, false);
-              setRun((p) => (p ? { ...p, done: p.done + 1 } : p));
+          async (ids) => {
+            for (const id of ids) {
+              if (ctrl.signal.aborted) break;
+              await testOneOf(id);
             }
           },
           ctrl.signal,

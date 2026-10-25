@@ -19,7 +19,8 @@ export type Outcome =
   | "ccOnly" // the group only admits Claude Code clients
   | "rateLimited" // 429 / saturated / concurrency → inconclusive
   | "blocked" // WAF / Cloudflare challenge / IP restriction → inconclusive
-  | "transient" // timeout / 5xx / gateway page → retry once, then inconclusive
+  | "upstream" // 5xx from the station: this model's channel failed → try another model
+  | "transient" // network error / timeout → retry once, then inconclusive
   | "internal" // our own platform limit (subrequests) → stop, inconclusive
   | "other";
 
@@ -70,7 +71,7 @@ export function classifyError(status: number, code: string, msg: string, r: Http
       return { outcome: "blocked", message: "被站点防护拦截（Cloudflare/WAF 挑战页）", uaFixable: !r.headers?.get("cf-mitigated") };
     }
     if (status === 200 || status === 404 || status === 405) return { outcome: "endpoint", message: `该接口不存在（HTTP ${status} 返回网页）` };
-    return { outcome: "transient", message: readableMessage(r) };
+    return { outcome: status >= 500 ? "upstream" : "other", message: readableMessage(r) };
   }
   const text = `${code} ${msg}`.trim();
   const display = (msg || code || readableMessage(r)).slice(0, 300);
@@ -94,7 +95,9 @@ export function classifyError(status: number, code: string, msg: string, r: Http
   if (RE_MODEL.test(text)) return { outcome: "modelIssue", message: display };
   if (status === 404 || status === 405) return /model|模型/i.test(text) ? { outcome: "modelIssue", message: display } : { outcome: "endpoint", message: display };
   if (status === 429 || RE_RATE.test(text)) return { outcome: "rateLimited", message: display };
-  if (status >= 500) return { outcome: "transient", message: display };
+  // The station answered, but this model's upstream failed ("Upstream service
+  // temporarily unavailable", a bare "error code: 502"…): another model may work.
+  if (status >= 500) return { outcome: "upstream", message: display };
   if (status === 403) return { outcome: "dead", message: display || "HTTP 403 拒绝访问" };
   return { outcome: "other", message: display || "上游返回无有效补全" };
 }
@@ -179,7 +182,7 @@ export function classifyResponse(shape: Shape, r: HttpResult): Classified {
     if (v.kind === "ok" && r.status < 400) return { outcome: "ok", message: "" };
     if (v.kind === "error") return classifyError(r.status >= 400 ? r.status : 200, v.code, v.message, r);
     if (r.status >= 400) return classifyError(r.status, "", "", r);
-    return { outcome: "transient", message: r.timedOut ? "流式响应超时（未收到任何内容）" : "流式响应中没有有效内容" };
+    return r.timedOut ? { outcome: "transient", message: "流式响应超时（未收到任何内容）" } : { outcome: "other", message: "流式响应中没有有效内容" };
   }
   if (r.ok && completionShape(shape, r.body)) {
     // With max_tokens:1 a real reply is a token or two. A longer "reply" that

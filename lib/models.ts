@@ -239,3 +239,13 @@ export function pickProbeModels(models: string[], ratios: ModelRatio[], limit: n
   }
   return ranked.length ? ranked : ["gpt-4o-mini"];
 }
+
+// Probe order: the models the operator really uses come first (pinned probe
+// model, the model that passed last time, the key's own usage stats), then the
+// cheap family-diverse picks. A relay often lists models whose channel is down;
+// testing the cheapest such model first is how a working key looked broken.
+export function orderProbeModels(preferred: string[], models: string[], ratios: ModelRatio[], limit: number): string[] {
+  const head = Array.from(new Set(preferred.map((m) => m.trim()).filter(Boolean))).slice(0, limit);
+  const rest = pickProbeModels(models, ratios, limit).filter((m) => !head.includes(m));
+  return [...head, ...rest].slice(0, limit);
+}

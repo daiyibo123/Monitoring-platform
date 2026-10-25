@@ -1,7 +1,7 @@
 import { claimKeyForAutoTest } from "../../../../lib/autotest";
 import { cachedSiteBalance, loadSiteBalance, saveSiteBalance, saveTestResult } from "../../../../lib/db";
 import { fail, ok, readJson } from "../../../../lib/http";
-import type { ApiKey, Env, Site } from "../../../../lib/types";
+import type { ApiKey, Env, KeyStatusRow, ProbeSummary, Site } from "../../../../lib/types";
 import { testKey } from "../../../../lib/upstream";
 
 // A site balance read this recently is reused instead of re-fetched per key.
@@ -24,11 +24,25 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env, params }
     return ok({ key_id: id, skipped: true });
   }
 
+  // The model that passed last time is tried first again.
+  const prev = await env.DB.prepare("SELECT state, probe FROM key_status WHERE key_id=?1").bind(id).first<Pick<KeyStatusRow, "state" | "probe">>();
+  let lastOk: string | undefined;
+  if (prev?.state === "ok" && prev.probe) {
+    try {
+      lastOk = (JSON.parse(prev.probe) as ProbeSummary).model ?? undefined;
+    } catch {
+      lastOk = undefined;
+    }
+  }
+
   const cached = await cachedSiteBalance(env, site.id, BALANCE_CACHE_SEC);
-  const result = await testKey(site, key.api_key, key.group_name, cached);
+  const result = await testKey(site, key.api_key, key.group_name, cached, { pinned: key.probe_model || undefined, lastOk });
   const status = await saveTestResult(env, id, result);
-  if (result.balance_fresh && result.balance.reachable && (result.balance.balance_usd != null || result.balance.unlimited)) {
-    await saveSiteBalance(env, site.id, result.balance);
+  // The site balance is set by the first good reading in each cache window, so
+  // keys of one site reading slightly different numbers can't make it flip.
+  const b = result.balance;
+  if (!cached && result.balance_fresh && b.reachable && (b.balance_usd != null || b.unlimited)) {
+    await saveSiteBalance(env, site.id, b);
   }
 
   return ok({ key_id: id, site_id: site.id, skipped: false, status, balance: await loadSiteBalance(env, site.id) });

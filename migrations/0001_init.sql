@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
   created_at      INTEGER NOT NULL,
   updated_at      INTEGER NOT NULL,
   auto_claimed_at INTEGER,                       -- 每日自动测活的认领时间（防止多设备重复测）
+  probe_model     TEXT    NOT NULL DEFAULT '',   -- 指定测活模型（可选，测活优先使用）
   FOREIGN KEY (site_id) REFERENCES sites(id) ON DELETE CASCADE
 );
 

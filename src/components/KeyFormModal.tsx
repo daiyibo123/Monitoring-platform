@@ -15,7 +15,9 @@ export function KeyFormModal({
   const [label, setLabel] = useState(apiKey?.label ?? "");
   const [groupName, setGroupName] = useState(apiKey?.group_name ?? "");
   const [key, setKey] = useState("");
+  const [probeModel, setProbeModel] = useState(apiKey?.probe_model ?? "");
   const [saving, setSaving] = useState(false);
+  const knownModels = apiKey?.status?.models ?? [];
   const [error, setError] = useState<string | null>(null);
 
   async function submit(e: FormEvent) {
@@ -27,7 +29,7 @@ export function KeyFormModal({
     }
     setSaving(true);
     try {
-      const data: KeyInput = { label: label.trim(), group_name: groupName.trim() };
+      const data: KeyInput = { label: label.trim(), group_name: groupName.trim(), probe_model: probeModel.trim() };
       if (key.trim()) data.api_key = key.trim();
       await onSubmit(data);
       onClose();
@@ -56,6 +58,25 @@ export function KeyFormModal({
             spellCheck={false}
           />
           {!apiKey && <p className="mt-1 text-xs text-dark-400">保存后会自动测活一次。</p>}
+        </Field>
+        <Field label="测活模型（可选）">
+          <input
+            className="input font-mono"
+            value={probeModel}
+            onChange={(e) => setProbeModel(e.target.value)}
+            placeholder="填你实际在用的模型，例如 claude-sonnet-4-5；留空自动选择"
+            list="probe-model-options"
+            autoComplete="off"
+            spellCheck={false}
+          />
+          {knownModels.length > 0 && (
+            <datalist id="probe-model-options">
+              {knownModels.map((m) => (
+                <option key={m} value={m} />
+              ))}
+            </datalist>
+          )}
+          <p className="mt-1 text-xs text-dark-400">测活优先用这个模型发真实请求；它失败时仍会自动尝试其他模型。</p>
         </Field>
 
         {error && <p className="rounded-lg bg-rose-500/10 px-3 py-2 text-sm text-rose-300 ring-1 ring-rose-500/20">{error}</p>}

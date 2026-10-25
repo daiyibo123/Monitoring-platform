@@ -51,7 +51,7 @@ export function Dashboard({ edit, onEditChange, onLogout }: { edit: boolean; onE
       if (key) {
         const r = await api.updateKey(key.id, data);
         if (r.key_changed) forgetKeySecret(key.id);
-        if (r.key_changed || data.group_name !== key.group_name) retest = key.id;
+        if (r.key_changed || r.probe_changed || data.group_name !== key.group_name) retest = key.id;
       } else {
         retest = (await api.createKey({ site_id: siteId, ...data })).id;
       }

@@ -17,8 +17,9 @@ const OUTCOME: Record<string, { label: string; tone: string }> = {
   ccVersion: { label: "版本校验", tone: MUTED },
   ccOnly: { label: "仅限 Claude Code", tone: ORANGE },
   rateLimited: { label: "限流", tone: ORANGE },
+  upstream: { label: "上游故障", tone: ORANGE },
   blocked: { label: "被拦截", tone: ORANGE },
-  transient: { label: "超时/网关", tone: ORANGE },
+  transient: { label: "超时/网络", tone: ORANGE },
   internal: { label: "平台限制", tone: ORANGE },
   other: { label: "失败", tone: MUTED },
 };
@@ -48,6 +49,12 @@ export function KeyDetail({ apiKey, state, keyLine }: { apiKey: ApiKey; state: K
           <code className="font-mono text-emerald-200/80">{probe.endpoint}</code>
           <code className="font-mono text-emerald-200/80">{probe.model}</code>
           <span className="font-mono">{formatMs(s?.latency_ms)}</span>
+        </p>
+      )}
+      {apiKey.probe_model && (
+        <p className="text-xs text-dark-400">
+          指定测活模型：<code className="font-mono text-dark-200">{apiKey.probe_model}</code>
+          {state === "available" && probe?.model && probe.model !== apiKey.probe_model && <span className="text-amber-300/90">（它这次没测通，已改用 {probe.model} 测通）</span>}
         </p>
       )}
 

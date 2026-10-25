@@ -46,6 +46,8 @@ export interface ApiKey {
   updated_at: number;
   // When the daily auto-test last claimed this key (unix s). See lib/autotest.ts.
   auto_claimed_at: number | null;
+  // Optional model the operator really uses with this key; the probe tries it first.
+  probe_model: string;
 }
 
 export interface ModelRatio {
@@ -86,6 +88,7 @@ export interface BalanceResult {
   raw: unknown;
   reachable: boolean; // an authed balance endpoint answered (not a network/auth failure)
   error: string | null;
+  used_models?: string[]; // models this key really used, most used first (sub2api /v1/usage)
 }
 
 // Result of testing a single key against its upstream station.
@@ -158,6 +161,7 @@ export interface PublicKey {
   label: string;
   group_name: string;
   key_masked: string;
+  probe_model: string;
   sort: number;
   created_at: number;
   updated_at: number;

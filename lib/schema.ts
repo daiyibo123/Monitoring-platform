@@ -27,6 +27,7 @@ const DDL = [
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     auto_claimed_at INTEGER,
+    probe_model TEXT NOT NULL DEFAULT '',
     FOREIGN KEY (site_id) REFERENCES sites(id) ON DELETE CASCADE
   )`,
   `CREATE INDEX IF NOT EXISTS idx_api_keys_site ON api_keys(site_id)`,
@@ -76,7 +77,10 @@ const COLUMNS: Record<string, Array<[string, string]>> = {
     ["access_token", "access_token TEXT NOT NULL DEFAULT ''"],
     ["newapi_user_id", "newapi_user_id TEXT NOT NULL DEFAULT ''"],
   ],
-  api_keys: [["auto_claimed_at", "auto_claimed_at INTEGER"]],
+  api_keys: [
+    ["auto_claimed_at", "auto_claimed_at INTEGER"],
+    ["probe_model", "probe_model TEXT NOT NULL DEFAULT ''"],
+  ],
   key_status: [
     ["state", "state TEXT"],
     ["probe", "probe TEXT"],

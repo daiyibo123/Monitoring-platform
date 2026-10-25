@@ -51,7 +51,7 @@ export const api = {
 
   createKey: (data: KeyInput & { site_id: number }) => request<{ id: number }>("/api/keys", post(data)),
   updateKey: (id: number, data: KeyInput) =>
-    request<{ id: number; key_changed: boolean }>(`/api/keys/${id}`, { method: "PUT", body: JSON.stringify(data) }),
+    request<{ id: number; key_changed: boolean; probe_changed: boolean }>(`/api/keys/${id}`, { method: "PUT", body: JSON.stringify(data) }),
   deleteKey: (id: number) => request<{ id: number }>(`/api/keys/${id}`, { method: "DELETE" }),
   keySecret: (id: number) => request<{ api_key: string }>(`/api/keys/${id}/secret`),
 

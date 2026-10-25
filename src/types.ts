@@ -48,6 +48,7 @@ export interface ApiKey {
   label: string;
   group_name: string;
   key_masked: string;
+  probe_model: string;
   sort: number;
   created_at: number;
   updated_at: number;
@@ -92,5 +93,6 @@ export interface SiteInput {
 export interface KeyInput {
   label: string;
   group_name: string;
+  probe_model: string;
   api_key?: string; // omitted on edit = keep
 }

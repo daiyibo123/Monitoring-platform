@@ -7,12 +7,14 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
     label?: string;
     group_name?: string;
     api_key?: string;
+    probe_model?: string;
   }>(request);
 
   const siteId = Number(body.site_id);
   const label = (body.label || "").trim();
   const groupName = (body.group_name || "").trim();
   const apiKey = (body.api_key || "").trim();
+  const probeModel = (body.probe_model || "").trim().slice(0, 120);
 
   if (!Number.isFinite(siteId)) return fail("无效的网站 ID");
   if (!apiKey) return fail("请填写 Key");
@@ -22,10 +24,10 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
 
   const now = Math.floor(Date.now() / 1000);
   const res = await env.DB.prepare(
-    `INSERT INTO api_keys (site_id, label, group_name, api_key, sort, created_at, updated_at)
-     VALUES (?1, ?2, ?3, ?4, 0, ?5, ?5)`,
+    `INSERT INTO api_keys (site_id, label, group_name, api_key, probe_model, sort, created_at, updated_at)
+     VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?6)`,
   )
-    .bind(siteId, label, groupName, apiKey, now)
+    .bind(siteId, label, groupName, apiKey, probeModel, now)
     .run();
 
   return ok({ id: res.meta.last_row_id });

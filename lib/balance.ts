@@ -29,6 +29,13 @@ async function fetchSub2ApiUsage(base: string, key: string): Promise<BalanceResu
   else if (typeof b.remaining === "number") remaining = b.remaining;
   const unlimited = remaining === -1;
   const used = typeof b.usage?.total?.cost === "number" ? b.usage.total.cost : null;
+  // Models this key really served, most requests first — the probe tries these
+  // before guessing, since a relay often lists models whose channel is broken.
+  const used_models = (Array.isArray(b.model_stats) ? b.model_stats : [])
+    .filter((m: any) => typeof m?.model === "string" && m.model && Number(m.requests) > 0)
+    .sort((x: any, y: any) => Number(y.requests) - Number(x.requests))
+    .map((m: any) => String(m.model))
+    .slice(0, 5);
   return {
     balance_usd: unlimited || remaining == null ? null : round(remaining),
     total_usage_usd: used != null ? round(used) : null,
@@ -37,6 +44,7 @@ async function fetchSub2ApiUsage(base: string, key: string): Promise<BalanceResu
     raw: { mode: b.mode ?? null, planName: b.planName ?? null, isValid: b.isValid ?? null, remaining: b.remaining ?? null },
     reachable: true,
     error: null,
+    used_models,
   };
 }
 

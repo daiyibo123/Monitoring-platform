@@ -86,6 +86,7 @@ export async function loadPublicSites(env: Env): Promise<PublicSite[]> {
       label: k.label,
       group_name: k.group_name,
       key_masked: maskKey(k.api_key),
+      probe_model: k.probe_model ?? "",
       sort: k.sort,
       created_at: k.created_at,
       updated_at: k.updated_at,

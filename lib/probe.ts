@@ -1,23 +1,20 @@
-import { classifyResponse, sseVerdict, type Classified, type Outcome, type Shape } from "./classify";
-import { pickProbeModels, shapesFor } from "./models";
-import { delay, httpRequest, redact } from "./net";
-import { buildProbeRequest, DEFAULT_CC_VERSION, TOKEN_LADDER, type UaMode } from "./request";
-import type { KeyState, ModelRatio, ProbeAttemptLog, ProbeSummary } from "./types";
+import type { Classified, Outcome, Shape } from "./classify";
+import { orderProbeModels, shapesFor } from "./models";
+import { redact } from "./net";
+import { ProbeRunner, type Run } from "./attempt";
+import type { KeyState, ModelRatio, ProbeSummary } from "./types";
 
 // The authoritative liveness probe: 可用 means a real completion came back,
-// nothing less. It walks cheap, family-diverse models across the endpoint shapes
-// a relay may serve (Anthropic /v1/messages, OpenAI chat/responses, Gemini) and
-// adapts to fixable rejections (output-limit parameter, stream-only, Claude Code
-// version/identity gates, bot filters) at zero token cost. Only a genuine
-// success generates tokens. Whatever it cannot settle is reported as 检测异常,
-// never as 不可用 — so our own noise is never blamed on the key.
+// nothing less. Models the operator really uses go first (pinned model, the one
+// that passed last time, the key's usage stats), then cheap family-diverse
+// picks. A model whose upstream fails (5xx) is skipped for the next model —
+// relays often list models whose channel is down, and testing such a model
+// must not make a working key look broken. Whatever cannot be settled is
+// reported as 检测异常, never as 不可用.
 
 const PROBE_DEADLINE_MS = 45000;
-const ATTEMPT_TIMEOUT_MS = 15000;
-const MIN_ATTEMPT_MS = 3000;
-const MAX_CALLS = 10;
-const MAX_MODELS = 4;
-const RETRY_DELAY_MS = 700;
+const MAX_CALLS = 16;
+const MAX_MODELS = 8;
 
 export interface ProbeOutcome {
   state: KeyState;
@@ -29,23 +26,25 @@ export interface ProbeOutcome {
   summary: ProbeSummary;
 }
 
-interface Run {
-  c: Classified;
-  status: number;
-  latency: number;
-  path: string;
-  model: string;
+export interface ProbeInput {
+  models: string[];
+  ratios: ModelRatio[];
+  preferred: string[]; // pinned / last good / really used models, in order
+  hint: Classified | null; // what GET /v1/models said about the key
+  deadlineAt?: number;
 }
 
-const INCONCLUSIVE_ORDER: Outcome[] = ["blocked", "ccOnly", "ccVersion", "rateLimited", "internal", "param", "stream", "transient", "other"];
+const INCONCLUSIVE_ORDER: Outcome[] = ["blocked", "ccOnly", "ccVersion", "rateLimited", "internal", "upstream", "transient", "param", "stream", "other"];
 
-function describe(run: Run): string {
+function describe(run: Run, tried: number): string {
   const m = run.c.message;
   switch (run.c.outcome) {
+    case "upstream":
+      return `上游暂时不可用（已试 ${tried} 个模型）：${m}`;
     case "rateLimited":
       return `上游限流或繁忙：${m}`;
     case "transient":
-      return `上游超时或网关错误：${m}`;
+      return `连接上游失败（超时或网络错误）：${m}`;
     case "ccOnly":
       return `该分组仅允许 Claude Code 客户端，检测请求未被放行：${m}`;
     case "ccVersion":
@@ -59,20 +58,22 @@ function describe(run: Run): string {
   }
 }
 
-export async function probeKey(
-  base: string,
-  key: string,
-  models: string[],
-  ratios: ModelRatio[],
-  hint: Classified | null,
-  deadlineAt = Infinity,
-): Promise<ProbeOutcome> {
-  const deadline = Math.min(deadlineAt, Date.now() + PROBE_DEADLINE_MS);
-  const attempts: ProbeAttemptLog[] = [];
-  let calls = 0;
-  let ccVersion = DEFAULT_CC_VERSION;
-  let retriedTransient = false;
-  const canCall = () => calls < MAX_CALLS && deadline - Date.now() > MIN_ATTEMPT_MS;
+type Step = "next" | "nextModel" | "stop" | "done";
+
+export async function probeKey(base: string, key: string, input: ProbeInput): Promise<ProbeOutcome> {
+  const deadline = Math.min(input.deadlineAt ?? Infinity, Date.now() + PROBE_DEADLINE_MS);
+  const runner = new ProbeRunner(base, key, deadline, MAX_CALLS);
+  const st = {
+    rejections: input.hint?.outcome === "dead" ? 1 : 0,
+    firstRejection: null as Run | null,
+    blocked: 0,
+    network: 0,
+    definitive: [] as Run[],
+    inconclusive: [] as Run[],
+    retry: [] as Array<{ model: string; shapes: Shape[] }>,
+    final: null as ProbeOutcome | null,
+    last: null as Run | null,
+  };
 
   const result = (state: KeyState, run: Run | null, error: string | null, rejected: boolean): ProbeOutcome => ({
     state,
@@ -81,94 +82,88 @@ export async function probeKey(
     error: error ? redact(error).slice(0, 400) : null,
     status: run?.status ?? null,
     latency: state === "ok" ? (run?.latency ?? null) : null,
-    summary: { model: run?.model ?? null, endpoint: run?.path ?? null, attempts: attempts.slice(-12) },
+    summary: { model: run?.model ?? null, endpoint: run?.path ?? null, attempts: runner.attempts.slice(-14) },
   });
 
-  async function once(shape: Shape, model: string, tokenIdx: number, stream: boolean, ua: UaMode, strict: boolean): Promise<Run> {
-    calls++;
-    const tokens = TOKEN_LADDER[shape][tokenIdx];
-    const req = buildProbeRequest(shape, base, key, model, { tokens, stream, ua, ccVersion, strict });
-    const r = await httpRequest(req.url, req.init, {
-      timeoutMs: Math.min(ATTEMPT_TIMEOUT_MS, Math.max(1000, deadline - Date.now())),
-      maxBytes: 262144,
-      stopEarly: (t) => sseVerdict(t).kind !== "none",
-    });
-    const c = classifyResponse(shape, r);
-    attempts.push({ endpoint: req.path, model, status: r.status, outcome: c.outcome, ms: r.latency, note: c.outcome === "ok" ? undefined : redact(c.message).slice(0, 140) });
-    return { c, status: r.status, latency: r.latency, path: req.path, model };
-  }
-
-  // One shape+model, adapting to the rejections we know how to fix.
-  async function combo(shape: Shape, model: string): Promise<Run | null> {
-    let tokenIdx = 0;
-    let stream = false;
-    let ua: UaMode = "native";
-    let strict = false;
-    let versionTried = false;
-    let last: Run | null = null;
-    for (let step = 0; step < 4 && canCall(); step++) {
-      last = await once(shape, model, tokenIdx, stream, ua, strict);
-      const { outcome, version, uaFixable } = last.c;
-      if (outcome === "param" && tokenIdx + 1 < TOKEN_LADDER[shape].length) tokenIdx++;
-      else if (outcome === "stream" && !stream) stream = true;
-      else if (outcome === "ccVersion" && version && !versionTried && version !== ccVersion) {
-        versionTried = true;
-        ccVersion = version;
-      } else if (outcome === "ccOnly" && shape === "anthropic" && !strict) strict = true;
-      else if (outcome === "blocked" && uaFixable && ua === "native") ua = "alt";
-      else if (outcome === "transient" && !retriedTransient && last.latency < 8000) {
-        retriedTransient = true;
-        await delay(RETRY_DELAY_MS);
-      } else break;
+  function judge(run: Run): Step {
+    st.last = run;
+    switch (run.c.outcome) {
+      case "ok":
+        st.final = result("ok", run, null, false);
+        return "done";
+      case "drained":
+        st.final = result("no_quota", run, run.c.message, false);
+        return "done";
+      case "dead":
+        st.firstRejection ??= run;
+        return ++st.rejections >= 2 ? "stop" : "next";
+      case "modelIssue":
+        st.definitive.push(run);
+        return "nextModel";
+      case "upstream":
+        st.inconclusive.push(run);
+        return "nextModel";
+      case "endpoint":
+      case "other":
+        st.definitive.push(run);
+        return "next";
+      case "blocked":
+        st.inconclusive.push(run);
+        return ++st.blocked >= 2 ? "stop" : "next";
+      case "transient":
+        st.inconclusive.push(run);
+        return ++st.network >= 2 ? "stop" : "nextModel";
+      default:
+        // internal / ccOnly / ccVersion / rateLimited / param / stream: affects
+        // the whole key or group — another model would only repeat it.
+        st.inconclusive.push(run);
+        return "stop";
     }
-    return last;
   }
 
-  let rejections = hint?.outcome === "dead" ? 1 : 0;
-  let firstRejection: Run | null = null;
-  let blocked = 0;
-  let last: Run | null = null;
-  const definitive: Run[] = [];
-  const inconclusive: Run[] = [];
-
-  outer: for (const model of pickProbeModels(models, ratios, MAX_MODELS)) {
-    for (const shape of shapesFor(model)) {
-      if (!canCall()) break outer;
-      const run = await combo(shape, model);
-      if (!run) break outer;
-      last = run;
-      const o = run.c.outcome;
-      if (o === "ok") return result("ok", run, null, false);
-      if (o === "drained") return result("no_quota", run, run.c.message, false);
-      if (o === "dead") {
-        firstRejection ??= run;
-        if (++rejections >= 2) break outer;
-      } else if (o === "modelIssue") {
-        definitive.push(run);
-        continue outer; // same model on another shape hits the same channel
-      } else if (o === "endpoint" || o === "other") {
-        definitive.push(run);
-      } else {
-        inconclusive.push(run);
-        if (o === "internal" || (o === "blocked" && ++blocked >= 2) || inconclusive.length >= 4) break outer;
-        if (o === "ccOnly") continue outer;
+  const order = orderProbeModels(input.preferred, input.models, input.ratios, MAX_MODELS);
+  // Pass 1: each model on its own shapes; a failing upstream skips to the next model.
+  pass1: for (const model of order) {
+    const shapes = shapesFor(model);
+    for (let i = 0; i < shapes.length; i++) {
+      if (!runner.canCall()) break pass1;
+      const run = await runner.combo(shapes[i], model);
+      if (!run) break pass1;
+      const step = judge(run);
+      if (step === "done") return st.final!;
+      if (step === "stop") break pass1;
+      if (step === "nextModel") {
+        if (run.c.outcome === "upstream" && i + 1 < shapes.length) st.retry.push({ model, shapes: shapes.slice(i + 1) });
+        continue pass1;
       }
     }
   }
-
-  if (firstRejection && (rejections >= 2 || inconclusive.length === 0)) {
-    return result("dead", firstRejection, `Key 被拒绝：${firstRejection.c.message}`, true);
+  // Pass 2: budget left — the other endpoint shape of models whose upstream failed.
+  pass2: for (const { model, shapes } of st.retry.slice(0, 2)) {
+    for (const shape of shapes) {
+      if (!runner.canCall() || st.rejections >= 2 || st.blocked >= 2 || st.network >= 2) break pass2;
+      const run = await runner.combo(shape, model);
+      if (!run) break pass2;
+      const step = judge(run);
+      if (step === "done") return st.final!;
+      if (step === "stop") break pass2;
+    }
   }
-  if (!inconclusive.length && definitive.length) {
-    const d = definitive[definitive.length - 1];
-    const allModel = definitive.every((r) => r.c.outcome === "modelIssue");
-    const tried = new Set(definitive.map((r) => r.model)).size;
+
+  const tried = new Set(runner.attempts.map((a) => a.model)).size;
+  const rejection = st.firstRejection;
+  if (rejection && (st.rejections >= 2 || st.inconclusive.length === 0)) {
+    return result("dead", rejection, `Key 被拒绝：${rejection.c.message}`, true);
+  }
+  if (!st.inconclusive.length && st.definitive.length) {
+    const d = st.definitive[st.definitive.length - 1];
+    const allModel = st.definitive.every((r) => r.c.outcome === "modelIssue");
     return result("dead", d, allModel ? `没有可用的模型/渠道（已试 ${tried} 个模型）：${d.c.message}` : d.c.message, false);
   }
-  if (inconclusive.length) {
-    const pick = INCONCLUSIVE_ORDER.map((o) => inconclusive.find((r) => r.c.outcome === o)).find(Boolean) ?? inconclusive[0];
-    const extra = firstRejection ? `；另有一次拒绝：${firstRejection.c.message}` : "";
-    return result("error", pick, describe(pick) + extra, false);
+  if (st.inconclusive.length) {
+    const pick = INCONCLUSIVE_ORDER.map((o) => st.inconclusive.find((r) => r.c.outcome === o)).find(Boolean) ?? st.inconclusive[0];
+    const extra = rejection ? `；另有一次拒绝：${rejection.c.message}` : "";
+    return result("error", pick, describe(pick, tried) + extra, false);
   }
-  return result("error", last, "检测超时：未在时限内得到结论", false);
+  return result("error", st.last, "检测超时：未在时限内得到结论", false);
 }
