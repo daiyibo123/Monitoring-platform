@@ -20,16 +20,17 @@ export interface ProviderMeta {
   badge: string;
 }
 
+// Vendor colors stay clear of the status colors (emerald/amber/orange/rose).
 export const PROVIDERS: Record<ProviderId, ProviderMeta> = {
-  openai: { id: "openai", label: "GPT", badge: "text-emerald-300 bg-emerald-500/10 ring-emerald-500/30" },
-  claude: { id: "claude", label: "Claude", badge: "text-orange-300 bg-orange-500/10 ring-orange-500/30" },
-  gemini: { id: "gemini", label: "Gemini", badge: "text-sky-300 bg-sky-500/10 ring-sky-500/30" },
-  grok: { id: "grok", label: "Grok", badge: "text-slate-200 bg-white/10 ring-white/20" },
-  glm: { id: "glm", label: "GLM", badge: "text-indigo-300 bg-indigo-500/10 ring-indigo-500/30" },
-  deepseek: { id: "deepseek", label: "DeepSeek", badge: "text-blue-300 bg-blue-500/10 ring-blue-500/30" },
-  qwen: { id: "qwen", label: "Qwen", badge: "text-violet-300 bg-violet-500/10 ring-violet-500/30" },
-  kimi: { id: "kimi", label: "Kimi", badge: "text-fuchsia-300 bg-fuchsia-500/10 ring-fuchsia-500/30" },
-  other: { id: "other", label: "其它", badge: "text-slate-300 bg-white/5 ring-white/10" },
+  openai: { id: "openai", label: "GPT", badge: "text-dark-100 bg-white/[0.07] ring-white/20" },
+  claude: { id: "claude", label: "Claude", badge: "text-[#e8a37c] bg-[#d97757]/10 ring-[#d97757]/35" },
+  gemini: { id: "gemini", label: "Gemini", badge: "text-sky-300 bg-sky-500/10 ring-sky-400/30" },
+  grok: { id: "grok", label: "Grok", badge: "text-zinc-200 bg-zinc-500/15 ring-zinc-400/30" },
+  glm: { id: "glm", label: "GLM", badge: "text-indigo-300 bg-indigo-500/10 ring-indigo-400/30" },
+  deepseek: { id: "deepseek", label: "DeepSeek", badge: "text-blue-300 bg-blue-500/10 ring-blue-400/30" },
+  qwen: { id: "qwen", label: "Qwen", badge: "text-violet-300 bg-violet-500/10 ring-violet-400/30" },
+  kimi: { id: "kimi", label: "Kimi", badge: "text-fuchsia-300 bg-fuchsia-500/10 ring-fuchsia-400/30" },
+  other: { id: "other", label: "其它", badge: "text-dark-300 bg-white/5 ring-white/10" },
 };
 
 // Ordered longest/most-specific first so e.g. "text-embedding" wins before we'd

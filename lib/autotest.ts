@@ -1,74 +1,48 @@
-import { saveTestResult } from "./db";
-import type { ApiKey, Env, Site } from "./types";
-import { refreshBalance, testKey, type BalanceResult } from "./upstream";
+import type { Env } from "./types";
 
-const AUTOTEST_KEY = "auto_test_date";
+// Daily auto-测活: every key is tested at most once per China-day, driven by the
+// dashboard that happens to be open. Pages Functions can't run a long
+// background sweep (waitUntil is cut off ~30s after the response), so the page
+// asks for today's pending keys and tests them one request per key. A per-key
+// claim with a lease keeps two open devices from testing the same key twice; a
+// lease that expires without a result (tab closed mid-test) is re-claimable.
 
-// Today's date (YYYY-MM-DD) in China time (UTC+8). The "one sweep per day"
-// boundary follows the operator's local day; keying on UTC would roll the day
-// over at 08:00 local, which is not what "每天一次" means to them.
-function chinaDate(): string {
-  const utc8 = new Date(Date.now() + 8 * 3600 * 1000);
-  return utc8.toISOString().slice(0, 10);
+const LEASE_SEC = 180;
+
+// Unix seconds of today's 00:00 in China time (UTC+8).
+export function chinaDayStart(nowMs = Date.now()): number {
+  const shifted = Math.floor((nowMs + 8 * 3600 * 1000) / 86400000) * 86400000;
+  return Math.floor((shifted - 8 * 3600 * 1000) / 1000);
 }
 
-// Atomically claim today's single auto-测活 slot. Returns true for EXACTLY ONE
-// caller per China-day; every other dashboard open that day (any user/device)
-// gets false. Implemented as a conditional upsert so two simultaneous first-
-// opens can't both win: SQLite is single-writer, and meta.changes is 1 only when
-// the row was actually inserted (first ever) or moved to a new day — a same-day
-// open hits the `WHERE value <> today` guard and writes nothing (changes = 0).
-export async function claimDailyAutoTest(env: Env): Promise<boolean> {
-  const today = chinaDate();
-  const res = await env.DB.prepare(
-    `INSERT INTO settings (key, value) VALUES (?1, ?2)
-     ON CONFLICT(key) DO UPDATE SET value = excluded.value
-       WHERE settings.value <> excluded.value`,
+// Keys with no verdict today that nobody is currently testing.
+export async function pendingKeyIds(env: Env): Promise<number[]> {
+  const now = Math.floor(Date.now() / 1000);
+  const rows = await env.DB.prepare(
+    `SELECT k.id FROM api_keys k
+     LEFT JOIN key_status s ON s.key_id = k.id
+     WHERE (s.tested_at IS NULL OR s.tested_at < ?1 OR (s.alive IS NULL AND s.state IS NULL))
+       AND (k.auto_claimed_at IS NULL OR k.auto_claimed_at < ?2)
+     ORDER BY k.id ASC`,
   )
-    .bind(AUTOTEST_KEY, today)
+    .bind(chinaDayStart(), now - LEASE_SEC)
+    .all<{ id: number }>();
+  return (rows.results ?? []).map((r) => r.id);
+}
+
+// Atomically claim one key for today's auto-test. Exactly one caller wins.
+export async function claimKeyForAutoTest(env: Env, keyId: number): Promise<boolean> {
+  const now = Math.floor(Date.now() / 1000);
+  const res = await env.DB.prepare(
+    `UPDATE api_keys SET auto_claimed_at = ?2
+     WHERE id = ?1
+       AND (auto_claimed_at IS NULL OR auto_claimed_at < ?3)
+       AND NOT EXISTS (
+         SELECT 1 FROM key_status s
+         WHERE s.key_id = api_keys.id AND s.tested_at >= ?4 AND (s.alive IS NOT NULL OR s.state IS NOT NULL)
+       )`,
+  )
+    .bind(keyId, now, now - LEASE_SEC, chinaDayStart())
     .run();
   return (res.meta?.changes ?? 0) >= 1;
-}
-
-// One full liveness sweep across every site's every key. Because it runs in the
-// background (waitUntil) with no client waiting on it, it goes FULLY SERIAL —
-// one key at a time, sites in order. Each testKey still fires only its own ~3
-// internal subrequests, so at most ~3 connections are ever open at once: no
-// burst, which is exactly what removes the spurious 超时/直接不可用 a parallel
-// sweep caused. Balance is account-level so it's fetched ONCE per site and
-// reused. Same minimum-token probe as manual 测活 (max_tokens:1 — only a genuine
-// success spends ~2 tokens, failures spend 0). Each key's status is persisted
-// the instant it finishes, so a not-yet-reached key keeps showing yesterday's
-// state until the sweep gets to it.
-export async function runDailyAutoTest(env: Env): Promise<void> {
-  const sites = (await env.DB.prepare("SELECT * FROM sites ORDER BY id ASC").all<Site>()).results ?? [];
-  for (const site of sites) {
-    const keys =
-      (await env.DB.prepare("SELECT * FROM api_keys WHERE site_id=?1 ORDER BY id ASC").bind(site.id).all<ApiKey>())
-        .results ?? [];
-    if (!keys.length) continue;
-
-    // Fetch the account balance once (try up to 3 keys until one reading is
-    // authoritative), then reuse it for every key of this site.
-    let siteBalance: BalanceResult | null = null;
-    for (const key of keys.slice(0, 3)) {
-      const bal = await refreshBalance(site.base_url, key.api_key, site.kind, site.access_token);
-      if (bal.reachable) {
-        siteBalance = bal;
-        break;
-      }
-    }
-
-    // Serial per key — test, persist, then move to the next.
-    for (const key of keys) {
-      try {
-        const result = await testKey(site.base_url, key.api_key, site.kind, key.group_name, site.access_token, {
-          balance: siteBalance,
-        });
-        await saveTestResult(env, key.id, result);
-      } catch {
-        // One key's failure must never abort the rest of the daily sweep.
-      }
-    }
-  }
 }

@@ -1,5 +1,5 @@
 import { getSession } from "../../lib/auth";
-import { forbidden, unauthorized } from "../../lib/http";
+import { fail, forbidden, unauthorized } from "../../lib/http";
 import { ensureSchema } from "../../lib/schema";
 import type { Env } from "../../lib/types";
 
@@ -7,34 +7,33 @@ import type { Env } from "../../lib/types";
 const PUBLIC_PATHS = new Set(["/api/login", "/api/session"]);
 
 // Write operations on these prefixes require an unlocked (edit) session. A plain
-// logged-in session may still GET them, run tests (/api/test/*), refresh
-// balances (/api/balance/*) and unlock/lock its own edit mode.
+// logged-in session may still GET them (including a key's secret for copying),
+// run tests (/api/test/*), refresh balances (/api/balance/*) and lock/unlock.
 const ADMIN_WRITE_PREFIXES = ["/api/sites", "/api/keys"];
 
 export const onRequest: PagesFunction<Env> = async (context) => {
   const { request, env, next } = context;
   const url = new URL(request.url);
+  const configured = Boolean(env.SESSION_SECRET && env.APP_PASSWORD);
 
-  if (PUBLIC_PATHS.has(url.pathname)) {
-    return next();
+  // Self-provision tables once per isolate (the login rate limiter needs them too).
+  if (configured && env.DB) {
+    try {
+      await ensureSchema(env);
+    } catch (e: any) {
+      return fail(`数据库初始化失败：${e?.message || e}`, 500);
+    }
   }
 
-  if (!env.SESSION_SECRET || !env.APP_PASSWORD) {
-    return unauthorized();
-  }
+  if (PUBLIC_PATHS.has(url.pathname)) return next();
+  if (!configured) return unauthorized();
 
   const session = await getSession(request, env);
   if (!session) return unauthorized();
 
-  // Read-only sessions cannot mutate site/key CRUD; they must unlock edit mode.
   const isWrite = request.method !== "GET" && request.method !== "HEAD";
   const hitsAdminPrefix = ADMIN_WRITE_PREFIXES.some((p) => url.pathname.startsWith(p));
-  if (isWrite && hitsAdminPrefix && !session.edit) {
-    return forbidden();
-  }
-
-  // Self-provision tables on first authed request per isolate.
-  await ensureSchema(env);
+  if (isWrite && hitsAdminPrefix && !session.edit) return forbidden();
 
   return next();
 };

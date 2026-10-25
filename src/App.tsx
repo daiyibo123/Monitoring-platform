@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { api } from "./api";
 import { ToastProvider } from "./components/Toast";
+import { Backdrop, BrandMark } from "./components/Backdrop";
+import { clearKeySecrets } from "./lib/secrets";
 import { Login } from "./pages/Login";
 import { Dashboard } from "./pages/Dashboard";
 
@@ -12,37 +14,38 @@ export function App() {
   const [configured, setConfigured] = useState(true);
   const [edit, setEdit] = useState(false);
 
-  async function checkSession() {
-    try {
-      const { authed, configured, edit } = await api.session();
-      setConfigured(configured);
-      if (authed) {
-        setEdit(edit);
-        setAuth("authed");
-      } else {
+  useEffect(() => {
+    (async () => {
+      try {
+        const { authed, configured, edit } = await api.session();
+        setConfigured(configured);
+        setEdit(authed && edit);
+        setAuth(authed ? "authed" : "guest");
+      } catch {
         setAuth("guest");
       }
-    } catch {
-      setAuth("guest");
-    }
-  }
-
-  useEffect(() => {
-    checkSession();
+    })();
   }, []);
 
   return (
     <ToastProvider>
       {auth === "loading" ? (
-        <div className="flex min-h-screen items-center justify-center text-slate-500">
-          <Loader2 className="mr-2 animate-spin" size={18} />
-          正在校验会话...
+        <div className="relative flex min-h-screen items-center justify-center">
+          <Backdrop />
+          <div className="relative z-10 flex flex-col items-center gap-4 text-dark-400">
+            <BrandMark size={56} />
+            <span className="flex items-center gap-2 text-sm">
+              <Loader2 className="animate-spin" size={16} />
+              正在校验会话…
+            </span>
+          </div>
         </div>
       ) : auth === "authed" ? (
         <Dashboard
           edit={edit}
           onEditChange={setEdit}
           onLogout={() => {
+            clearKeySecrets();
             setEdit(false);
             setAuth("guest");
           }}

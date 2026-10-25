@@ -26,15 +26,16 @@
 ### ✨ 功能特性
 
 - **多网站 / 多分组**：一个中转站下挂多个 Key（分组），统一管理。
-- **一键测活 + 倍率 + 模型**：点一次「测活」同时完成——
-  - `GET /v1/models` 判断分组是否可用、拉取可用模型列表；
-  - `GET /api/pricing`（New-API/One-API）解析**分组倍率**与**每个模型的倍率**；sub2api 走 `GET /v1/sub2api/billing`。
-- **余额（网站级）**：一个网站 = 一个账户，余额只在网站行显示一次，不按 Key 叠加；总余额 = 各网站余额之和。
-- **倍率升序**：网站内 Key 自动**从低倍率到高倍率**排序（未测活的排最后），无论全部展示还是按渠道筛选都保持一致。
+- **真实请求测活**：用该 Key 能用的最便宜模型发一次真实 `"hi"` 请求（`max_tokens=1`），**只有真正返回补全才算可用**。自动适配 Anthropic `/v1/messages`、OpenAI `/v1/chat/completions` / `/v1/responses`、Gemini 原生接口，以及 `max_tokens` 参数不兼容、只支持流式、sub2api「仅限 Claude Code」分组等情况；失败的请求不消耗 token。
+- **四种状态**：可用 / 无额度（Key 有效但余额用尽）/ 不可用（Key 被拒绝，或没有任何可用模型）/ 检测异常（超时、网关错误、防护拦截、上游限流等未能得出结论的情况，不会把能用的 Key 判成不可用）。展开 Key 可查看每次探测请求的记录。
+- **倍率与模型**：`GET /api/pricing`（New-API/One-API）解析**分组倍率**与**每个模型的倍率**；sub2api 走 `GET /v1/sub2api/billing`。
+- **余额（网站级）**：一个网站 = 一个账户，余额只显示一次，不按 Key 叠加；总余额 = 各网站余额之和。读取失败时保留上次的余额。
+- **排序**：网站按「可用在前、不可用在后」排列，每一类里再按余额从高到低；网站内的 Key 同样可用在前，再按倍率从低到高。
+- **每日自动测活**：每天（北京时间）首次打开面板时，自动把当天还没测过的 Key 测一遍；每个 Key 每天最多自动测一次，多台设备同时打开也不会重复测。
 - **自动识别厂商**：根据返回的模型列表判断 Key 属于哪一家（GPT / Claude / Grok / GLM / Gemini / DeepSeek / Qwen / Kimi），打标签并可**按渠道筛选**。
 - **结果持久化**：测活结果存入 D1，不重新测活也始终显示上次的倍率 / 余额。
 - **单账号 + 密码解锁编辑**：登录后默认**查看模式**（测活 / 复制 / 看余额，只读）；点「编辑」再次输入密码解锁**编辑模式**才可增删改，服务端强制校验，绕不过前端。
-- **精致 UI**：暗色玻璃拟态、发光统计磁贴、极光动效背景，一行一站、单行 Key 的紧凑布局。
+- **界面**：参考 sub2api 的青色系暗色主题，玻璃质感卡片、统计磁贴、测活进度条，适配手机。
 
 ### 🧱 技术栈
 
@@ -45,7 +46,7 @@
 | 存储 | Cloudflare D1（SQLite） |
 | 鉴权 | HMAC-SHA256 签名会话（HttpOnly / Secure / SameSite=Lax Cookie），Web Crypto 实现 |
 
-> 所有上游请求都在服务端发起，天然规避浏览器 CORS，API Key 不会下发到前端。
+> 所有上游请求都在服务端发起，天然规避浏览器 CORS。网站列表只返回脱敏后的 Key，完整 Key 仅在点击「显示 / 复制」时按需获取；访问令牌永不下发到前端。
 
 ### 🚀 本地开发
 
@@ -103,13 +104,15 @@ npx wrangler pages secret put ADMIN_USERNAME   # 可选，默认 admin
 
 **分组标识**：中转站若按分组区分倍率（如 `default` / `vip`），在 Key 上填对应分组标识即可匹配；留空取默认分组。
 
-**访问令牌（可选，仅 New-API）**：部分 New-API 站点把 `/api/pricing` 锁在登录之后，用中转 `sk-` key 会返回 401，导致倍率读不到。此时在该站「个人设置 → 生成访问令牌」复制访问令牌，填到网站的「访问令牌」字段即可读取分组倍率（该令牌只用于读取 `/api/pricing`，`/v1/models`、余额仍用 `sk-` key）。留空则用 `sk-` key 尝试，对未上锁的站点照常可用。
+**访问令牌（可选，仅 New-API）**：部分 New-API 站点把 `/api/pricing` 锁在登录之后，用中转 `sk-` key 会返回 401，导致倍率读不到。此时在该站「个人设置 → 生成访问令牌」复制访问令牌，填到网站的「访问令牌」字段，即可读取分组倍率和账户余额（`/api/user/self`）；测活仍用 `sk-` key。新版 New-API 使用访问令牌时还要求 `New-Api-User` 请求头，请同时填写个人设置里显示的「用户 ID」。留空则用 `sk-` key 尝试，对未上锁的站点照常可用。
 
 ### 🔒 安全说明
 
 - 所有 `/api/*`（除登录 / 会话检查）都需有效会话 Cookie；凭据用常量时间比较校验，令牌用 `SESSION_SECRET` 做 HMAC 签名、携带 `edit` 标志、7 天过期。
 - 登录后默认只读；解锁编辑（`/api/unlock`）需再次校验密码，服务端才重签 `edit:true` 令牌，写操作在中间件强制拦截（403）。
-- 中转站 API Key 以明文存储在 D1（Cloudflare 对 D1 静态加密，但库内明文）。这是单用户工具在登录门 + HTTPS 下的合理取舍，请勿开放给不受信任的人。
+- 登录与解锁接口按 IP 限流：15 分钟内最多 8 次密码错误，超出后需等待。
+- 中转站 API Key 以明文存储在 D1（Cloudflare 对 D1 静态加密，但库内明文）。网站列表只下发脱敏 Key，完整 Key 需登录后按需获取。这是单用户工具在登录门 + HTTPS 下的合理取舍，请勿开放给不受信任的人。
+- 会话是无状态签名令牌，退出登录只清除本机 Cookie；如怀疑会话泄露，更换 `SESSION_SECRET` 即可让所有会话失效。
 - 请为 `APP_PASSWORD` 用强密码，`SESSION_SECRET` 用足够长的随机串。页面已设 `noindex` 防收录。
 
 ---
@@ -121,15 +124,16 @@ A self-hosted dashboard for monitoring AI API relay stations (New-API / One-API 
 ### ✨ Features
 
 - **Multi-site / multi-group**: manage many keys (groups) under each relay station.
-- **One-click test + ratios + models**: a single "test" fetches everything —
-  - `GET /v1/models` to check availability and list accessible models;
-  - `GET /api/pricing` (New-API/One-API) to parse the **group ratio** and **per-model ratios**; sub2api uses `GET /v1/sub2api/billing`.
-- **Balance (site-level)**: one site = one account. The balance is shown once per site (never multiplied per key); the total is the sum across sites.
-- **Ratio ascending**: keys are sorted **from low to high ratio** (untested last), consistently whether showing all or filtering by channel.
+- **Real-request liveness**: sends one real `"hi"` request (`max_tokens=1`) with the cheapest model the key can use; **only a genuine completion counts as available**. It adapts to Anthropic `/v1/messages`, OpenAI `/v1/chat/completions` / `/v1/responses`, Gemini native, `max_tokens` parameter mismatches, stream-only endpoints and sub2api "Claude Code only" groups. Failed requests cost no tokens.
+- **Four states**: available / no quota (key valid, balance used up) / unavailable (key rejected, or no usable model) / check error (timeout, gateway error, WAF block, upstream rate limit — inconclusive, never reported as unavailable). Expand a key to see every probe request.
+- **Ratios and models**: `GET /api/pricing` (New-API/One-API) for the **group ratio** and **per-model ratios**; sub2api uses `GET /v1/sub2api/billing`.
+- **Balance (site-level)**: one site = one account. The balance is shown once per site (never multiplied per key); the total is the sum across sites. A failed refresh keeps the last known balance.
+- **Ordering**: sites are listed available first, then unavailable; within each group by balance, high to low. Keys inside a site: available first, then by ratio, low to high.
+- **Daily auto-test**: the first dashboard open of each day (China time) tests every key not yet tested that day. Each key is auto-tested at most once a day, even with several devices open.
 - **Auto provider detection**: infers the provider from the returned model list (GPT / Claude / Grok / GLM / Gemini / DeepSeek / Qwen / Kimi), tags it, and lets you **filter by channel**.
 - **Persisted results**: test results are stored in D1, so the last ratios/balance stay visible without re-testing.
 - **Single account + password-unlocked editing**: after login you're in **view mode** (test / copy / view balance, read-only); click "Edit" and re-enter the password to unlock **edit mode** for create/update/delete — enforced server-side, not bypassable from the client.
-- **Polished UI**: dark glassmorphism, glowing stat tiles, an aurora-animated background, and a compact one-site-per-row / single-line-key layout.
+- **UI**: teal dark theme modeled on sub2api, glass cards, stat tiles, a live test progress bar, mobile-friendly.
 
 ### 🧱 Tech Stack
 
@@ -140,7 +144,7 @@ A self-hosted dashboard for monitoring AI API relay stations (New-API / One-API 
 | Storage | Cloudflare D1 (SQLite) |
 | Auth | HMAC-SHA256 signed sessions (HttpOnly / Secure / SameSite=Lax cookie) via Web Crypto |
 
-> All upstream requests are made server-side, avoiding browser CORS and never sending API keys to the frontend.
+> All upstream requests are made server-side, avoiding browser CORS. The site list carries only masked keys; a full key is fetched on demand when you click show / copy. Access tokens are never sent to the frontend.
 
 ### 🚀 Local Development
 
@@ -198,13 +202,15 @@ npx wrangler pages secret put ADMIN_USERNAME   # optional, defaults to "admin"
 
 **Group name**: if the relay differentiates ratios by group (e.g. `default` / `vip`), set the matching group name on the key; leave blank for the default group.
 
-**Access token (optional, New-API only)**: some New-API stations gate `/api/pricing` behind login, so the relay `sk-` key gets a 401 and ratios can't be read. Generate a user access token on that station ("Personal settings → Generate access token") and paste it into the site's "access token" field to read group ratios (the token is used only for `/api/pricing`; `/v1/models` and balance still use the `sk-` key). Leave it blank to try the `sk-` key, which works on stations that leave pricing public.
+**Access token (optional, New-API only)**: some New-API stations gate `/api/pricing` behind login, so the relay `sk-` key gets a 401 and ratios can't be read. Generate a user access token on that station ("Personal settings → Generate access token") and paste it into the site's "access token" field to read group ratios and the account balance (`/api/user/self`); liveness tests still use the `sk-` key. Newer New-API versions also require a `New-Api-User` header with the access token, so fill in the "user ID" shown in personal settings too. Leave it blank to try the `sk-` key, which works on stations that leave pricing public.
 
 ### 🔒 Security Notes
 
 - Every `/api/*` route (except login / session check) requires a valid session cookie. Credentials use constant-time comparison; the token is HMAC-signed with `SESSION_SECRET`, carries an `edit` flag, and expires after 7 days.
 - After login you're read-only; unlocking edit mode (`/api/unlock`) re-verifies the password before the server re-signs an `edit:true` token, and writes are blocked in middleware (403) otherwise.
-- Relay API keys are stored in plaintext in D1 (Cloudflare encrypts D1 at rest, but rows are plaintext). This is a reasonable trade-off for a single-user tool behind a login gate + HTTPS — do not expose it to untrusted users.
+- Login and unlock are rate-limited per IP: at most 8 wrong passwords per 15 minutes.
+- Relay API keys are stored in plaintext in D1 (Cloudflare encrypts D1 at rest, but rows are plaintext). The site list only carries masked keys; a full key is fetched on demand by a logged-in session. This is a reasonable trade-off for a single-user tool behind a login gate + HTTPS — do not expose it to untrusted users.
+- Sessions are stateless signed tokens: logging out only clears the local cookie. If you suspect a session leaked, rotate `SESSION_SECRET` to invalidate every session.
 - Use a strong `APP_PASSWORD` and a long random `SESSION_SECRET`. The page is set to `noindex`.
 
 ---

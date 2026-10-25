@@ -1,4 +1,4 @@
-import type { ModelRatio, Site, SiteKind } from "./types";
+import type { KeyInput, KeyStatus, Site, SiteBalance, SiteInput } from "./types";
 
 interface ApiEnvelope<T> {
   success: boolean;
@@ -6,13 +6,12 @@ interface ApiEnvelope<T> {
   error?: string;
 }
 
+export class UnauthorizedError extends Error {}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
     ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...(init?.headers || {}),
-    },
+    headers: { "Content-Type": "application/json", ...(init?.headers || {}) },
     credentials: "same-origin",
   });
 
@@ -23,65 +22,41 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     body = null;
   }
 
-  if (res.status === 401) {
-    throw new UnauthorizedError(body?.error || "未登录");
-  }
-  if (!res.ok || !body || body.success === false) {
-    throw new Error(body?.error || `请求失败 (${res.status})`);
-  }
+  if (res.status === 401) throw new UnauthorizedError(body?.error || "未登录");
+  if (!res.ok || !body || body.success === false) throw new Error(body?.error || `请求失败 (${res.status})`);
   return body.data as T;
 }
 
-export class UnauthorizedError extends Error {}
+const post = (body?: unknown): RequestInit => ({ method: "POST", body: JSON.stringify(body ?? {}) });
 
-export interface TestResultPayload {
-  alive: boolean;
-  latency_ms: number | null;
-  http_status: number | null;
-  error: string | null;
-  group_ratio: number | null;
-  model_ratios: ModelRatio[];
-  models: string[];
-  balance_usd: number | null;
-  total_usage_usd: number | null;
-  pricing_source: string;
+export interface TestKeyResponse {
+  key_id: number;
+  site_id?: number;
+  skipped: boolean;
+  status?: KeyStatus | null;
+  balance?: SiteBalance | null;
 }
 
 export const api = {
   session: () => request<{ authed: boolean; configured: boolean; edit: boolean }>("/api/session"),
-  login: (username: string, password: string) =>
-    request<{ ok: boolean }>("/api/login", {
-      method: "POST",
-      body: JSON.stringify({ username, password }),
-    }),
-  logout: () => request<Record<string, never>>("/api/logout", { method: "POST" }),
-  unlock: (password: string) =>
-    request<{ edit: boolean }>("/api/unlock", { method: "POST", body: JSON.stringify({ password }) }),
-  lock: () => request<{ edit: boolean }>("/api/lock", { method: "POST" }),
+  login: (username: string, password: string) => request<{ ok: boolean }>("/api/login", post({ username, password })),
+  logout: () => request<Record<string, never>>("/api/logout", post()),
+  unlock: (password: string) => request<{ edit: boolean }>("/api/unlock", post({ password })),
+  lock: () => request<{ edit: boolean }>("/api/lock", post()),
 
   listSites: () => request<Site[]>("/api/sites"),
-  createSite: (data: { name: string; base_url: string; kind: SiteKind; note: string; access_token: string }) =>
-    request<{ id: number }>("/api/sites", { method: "POST", body: JSON.stringify(data) }),
-  updateSite: (id: number, data: { name: string; base_url: string; kind: SiteKind; note: string; access_token: string }) =>
-    request<{ id: number }>(`/api/sites/${id}`, { method: "PUT", body: JSON.stringify(data) }),
+  createSite: (data: SiteInput) => request<{ id: number }>("/api/sites", post(data)),
+  updateSite: (id: number, data: SiteInput) => request<{ id: number }>(`/api/sites/${id}`, { method: "PUT", body: JSON.stringify(data) }),
   deleteSite: (id: number) => request<{ id: number }>(`/api/sites/${id}`, { method: "DELETE" }),
 
-  createKey: (data: { site_id: number; label: string; group_name: string; api_key: string }) =>
-    request<{ id: number }>("/api/keys", { method: "POST", body: JSON.stringify(data) }),
-  updateKey: (id: number, data: { label: string; group_name: string; api_key: string }) =>
-    request<{ id: number }>(`/api/keys/${id}`, { method: "PUT", body: JSON.stringify(data) }),
+  createKey: (data: KeyInput & { site_id: number }) => request<{ id: number }>("/api/keys", post(data)),
+  updateKey: (id: number, data: KeyInput) =>
+    request<{ id: number; key_changed: boolean }>(`/api/keys/${id}`, { method: "PUT", body: JSON.stringify(data) }),
   deleteKey: (id: number) => request<{ id: number }>(`/api/keys/${id}`, { method: "DELETE" }),
+  keySecret: (id: number) => request<{ api_key: string }>(`/api/keys/${id}/secret`),
 
-  testKey: (id: number) =>
-    request<{ key_id: number; result: TestResultPayload }>(`/api/test/key/${id}`, { method: "POST" }),
-  testSite: (id: number) =>
-    request<{ site_id: number; results: { key_id: number; result: TestResultPayload }[] }>(
-      `/api/test/site/${id}`,
-      { method: "POST" },
-    ),
-  refreshBalance: (siteId?: number) =>
-    request<{ results: { key_id: number; balance_usd: number | null; total_usage_usd: number | null }[] }>(
-      "/api/balance/refresh",
-      { method: "POST", body: JSON.stringify(siteId ? { site_id: siteId } : {}) },
-    ),
+  testKey: (id: number, auto = false) => request<TestKeyResponse>(`/api/test/key/${id}`, post({ auto })),
+  pendingTests: () => request<{ key_ids: number[]; day_start: number }>("/api/test/pending"),
+  refreshBalance: (siteId: number, force = false) =>
+    request<{ site_id: number; balance: SiteBalance | null; cached: boolean }>("/api/balance/refresh", post({ site_id: siteId, force })),
 };

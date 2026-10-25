@@ -1,27 +1,21 @@
 import { useMemo, useState } from "react";
-import {
-  Activity,
-  ChevronRight,
-  Globe,
-  Loader2,
-  Pencil,
-  Plus,
-  Trash2,
-  Wallet,
-} from "lucide-react";
+import { Activity, AlertTriangle, ChevronRight, Loader2, Pencil, Plus, StickyNote, Trash2, Wallet } from "lucide-react";
 import type { ApiKey, Site } from "../types";
 import { CopyButton } from "./CopyButton";
 import { KeyRow } from "./KeyRow";
-import { formatUsd } from "../lib/format";
+import { formatTimeAgo, formatUsd, hostOf } from "../lib/format";
 import { siteBalance } from "../lib/balance";
-import { keyState } from "../lib/status";
+import { sortKeys } from "../lib/sort";
+import { keyState, STATE_META, STATE_ORDER, type KeyState } from "../lib/status";
 import { detectProviders, PROVIDERS, type ProviderId } from "../lib/providers";
 
 export function SiteCard({
   site,
   editMode,
   testingKeys,
-  testingSite,
+  queuedKeys,
+  busy,
+  balanceLoading,
   onTestSite,
   onTestKey,
   onAddKey,
@@ -33,7 +27,9 @@ export function SiteCard({
   site: Site;
   editMode: boolean;
   testingKeys: Set<number>;
-  testingSite: boolean;
+  queuedKeys: Set<number>;
+  busy: boolean;
+  balanceLoading: boolean;
   onTestSite: () => void;
   onTestKey: (key: ApiKey) => void;
   onAddKey: () => void;
@@ -44,198 +40,120 @@ export function SiteCard({
 }) {
   const [collapsed, setCollapsed] = useState(true);
   const [channel, setChannel] = useState<ProviderId | "all">("all");
-
-  const total = site.keys.length;
   const balance = siteBalance(site);
+  const keys = useMemo(() => sortKeys(site), [site]);
+  const states = useMemo(() => new Map(site.keys.map((k) => [k.id, keyState(k.status, balance)] as const)), [site.keys, balance]);
+  const available = [...states.values()].filter((s) => s === "available").length;
+  const best: KeyState = STATE_ORDER.find((st) => [...states.values()].includes(st)) ?? "untested";
+  const accent = STATE_META[best];
 
-  // Per-key three-state tally, so the header agrees with the row dots: a key
-  // that answers but whose account balance is spent counts as 无额度, NOT 可用.
-  // Balance is site-level, shared by every key on this site.
-  const counts = useMemo(() => {
-    let available = 0;
-    let noQuota = 0;
-    for (const k of site.keys) {
-      const st = keyState(k.status?.alive, balance);
-      if (st === "available") available++;
-      else if (st === "no_quota") noQuota++;
-    }
-    return { available, noQuota };
-  }, [site.keys, balance]);
-
-  // Provider per key (from its accessible models), used for chips + filtering.
-  const keyProviders = useMemo(() => {
-    const map = new Map<number, ProviderId | null>();
-    for (const k of site.keys) map.set(k.id, detectProviders(k.status?.models).primary);
-    return map;
-  }, [site.keys]);
-
-  // Distinct channels present across the site's keys, for the chip row. Uses
-  // each key's PRIMARY provider so the filter chips line up with visibleKeys'
-  // primary-based filtering below.
-  const channels = useMemo(() => {
-    const set = new Set<ProviderId>();
-    // Skip the "other" catch-all — we only surface recognised model families.
-    for (const p of keyProviders.values()) if (p && p !== "other") set.add(p);
-    return [...set];
-  }, [keyProviders]);
-
-  // If the selected channel no longer exists (its last key was deleted / re-tested
-  // into another family, or dropped as "其它"), fall back to 全部 so the list can't
-  // strand on an empty, un-resettable filter.
-  const effectiveChannel = channel === "all" || channels.includes(channel) ? channel : "all";
-
-  // ALL model families offered anywhere on the site — the union over every
-  // key's full provider list, not just the primary. A single relay key often
-  // exposes both GPT and Claude models; the header badges must show both, so
-  // they read from this (ordered by how many keys back each family), while the
-  // filter chips above stay primary-based.
+  const keyProviders = useMemo(() => new Map(site.keys.map((k) => [k.id, detectProviders(k.status?.models).primary] as const)), [site.keys]);
+  const channels = useMemo(() => [...new Set([...keyProviders.values()].filter((p): p is ProviderId => !!p && p !== "other"))], [keyProviders]);
   const families = useMemo(() => {
     const counts = new Map<ProviderId, number>();
-    for (const k of site.keys) {
-      for (const p of detectProviders(k.status?.models).providers) {
-        // Only real model families in the header badges — never the "其它" bucket.
-        if (p === "other") continue;
-        counts.set(p, (counts.get(p) ?? 0) + 1);
-      }
-    }
+    for (const k of site.keys) for (const p of detectProviders(k.status?.models).providers) if (p !== "other") counts.set(p, (counts.get(p) ?? 0) + 1);
     return [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([id]) => id);
   }, [site.keys]);
-
-  // Keys sorted by group ratio (low -> high); null ratios last. Then filtered
-  // by the selected channel. Sorting is derived (no persistence needed).
-  const visibleKeys = useMemo(() => {
-    const sorted = [...site.keys].sort((a, b) => {
-      const ra = a.status?.group_ratio;
-      const rb = b.status?.group_ratio;
-      if (ra == null && rb == null) return 0;
-      if (ra == null) return 1;
-      if (rb == null) return -1;
-      return ra - rb;
-    });
-    if (effectiveChannel === "all") return sorted;
-    return sorted.filter((k) => keyProviders.get(k.id) === effectiveChannel);
-  }, [site.keys, effectiveChannel, keyProviders]);
+  const effective = channel === "all" || channels.includes(channel) ? channel : "all";
+  const visible = effective === "all" ? keys : keys.filter((k) => keyProviders.get(k.id) === effective);
+  const initial = Array.from(site.name.trim() || "?")[0].toUpperCase();
 
   return (
-    <div className="card card-hover group relative overflow-hidden">
-      {/* top accent line, brightens on hover */}
-      <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-brand-500/40 to-transparent opacity-60 transition-opacity duration-300 group-hover:opacity-100" />
+    <article className={`card card-hover group relative overflow-hidden ${available ? "" : "opacity-[0.92]"}`}>
+      <span className={`absolute inset-y-0 left-0 w-1 bg-gradient-to-b ${accent.accent} ${available ? "shadow-[0_0_14px_rgba(52,211,153,0.6)]" : "opacity-70"}`} />
+      <span className="shimmer-line absolute inset-x-0 top-0 h-px opacity-0 transition-opacity duration-500 group-hover:animate-shimmer group-hover:opacity-100" />
 
-      {/* site header — everything on one row (wraps only when truly cramped) */}
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-white/5 bg-white/[0.015] px-5 py-3.5">
-        <button
-          onClick={() => setCollapsed((v) => !v)}
-          className="flex min-w-0 flex-1 items-center gap-3 text-left"
-        >
-          <ChevronRight
-            size={19}
-            className={`shrink-0 text-slate-500 transition-transform duration-200 ${collapsed ? "" : "rotate-90"}`}
-          />
-          <div className="relative shrink-0">
-            <div className="absolute inset-0 rounded-xl bg-brand-grad opacity-30 blur-md" />
-            <div className="relative flex h-10 w-10 items-center justify-center rounded-xl bg-brand-600/20 ring-1 ring-brand-500/30">
-              <Globe size={19} className="text-brand-300" />
-            </div>
-          </div>
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <h3 className="truncate text-base font-semibold text-white">{site.name}</h3>
-              <span className="shrink-0 rounded-md bg-white/5 px-1.5 py-0.5 text-xs uppercase tracking-wide text-slate-400 ring-1 ring-white/5">
-                {site.kind}
-              </span>
-            </div>
-            <span className="mt-0.5 block truncate font-mono text-xs text-slate-500">{site.base_url}</span>
-          </div>
+      <header className="flex flex-wrap items-center gap-x-4 gap-y-3 py-3.5 pl-5 pr-4">
+        <button onClick={() => setCollapsed((v) => !v)} className="flex min-w-0 grow basis-full items-center gap-3 text-left sm:basis-0" aria-expanded={!collapsed}>
+          <ChevronRight size={18} className={`shrink-0 text-dark-500 transition-transform duration-200 ${collapsed ? "" : "rotate-90 text-primary-300"}`} />
+          <span className="relative flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-primary-500/25 to-cyan-500/10 text-lg font-bold text-primary-200 ring-1 ring-primary-400/25">
+            {initial}
+            <span className="absolute -bottom-0.5 -right-0.5 flex h-3 w-3">
+              {available > 0 && <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-60" />}
+              <span className={`relative inline-flex h-3 w-3 rounded-full ring-2 ring-dark-900 ${accent.dot}`} />
+            </span>
+          </span>
+          <span className="min-w-0">
+            <span className="flex flex-wrap items-center gap-1.5">
+              <span className="truncate text-base font-semibold text-white">{site.name}</span>
+              <span className="chip-muted uppercase tracking-wide">{site.kind}</span>
+              {families.slice(0, 4).map((p) => (
+                <span key={p} className={`chip hidden md:inline-flex ${PROVIDERS[p].badge}`}>
+                  {PROVIDERS[p].label}
+                </span>
+              ))}
+            </span>
+            <span className="mt-0.5 block truncate font-mono text-xs text-dark-500" title={site.base_url}>
+              {hostOf(site.base_url)}
+            </span>
+          </span>
         </button>
 
-        {/* provider badges — what this site offers (GPT / Claude / …), shown
-            in the header so it reads at a glance even while collapsed. */}
-        {families.length > 0 && (
-          <div className="hidden shrink-0 items-center gap-1.5 md:flex">
-            {families.slice(0, 5).map((p) => (
-              <span
-                key={p}
-                className={`shrink-0 rounded-md px-1.5 py-0.5 text-[11px] font-medium ring-1 ${PROVIDERS[p].badge}`}
-                title={`该站提供 ${PROVIDERS[p].label} 模型`}
-              >
-                {PROVIDERS[p].label}
-              </span>
-            ))}
-            {families.length > 5 && (
-              <span className="shrink-0 text-[11px] text-slate-500">+{families.length - 5}</span>
-            )}
-          </div>
-        )}
-
-        {/* summary + actions, all inline on the right */}
-        <div className="flex shrink-0 items-center gap-2">
-          <div className="flex items-center gap-1.5 rounded-lg bg-white/5 px-2.5 py-1 text-sm ring-1 ring-white/5" title="可用 Key 数（有额度且可用）">
-            <span className={`h-1.5 w-1.5 rounded-full ${counts.available > 0 ? "bg-emerald-400 shadow-[0_0_6px] shadow-emerald-400/70" : "bg-slate-600"}`} />
-            <span className="font-semibold text-emerald-400">{counts.available}</span>
-            <span className="text-slate-500">/{total}</span>
-          </div>
-          {counts.noQuota > 0 && (
-            <div className="flex items-center gap-1.5 rounded-lg bg-amber-500/10 px-2 py-1 text-sm ring-1 ring-amber-500/25" title="Key 可用，但账户余额已用尽">
-              <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
-              <span className="font-semibold text-amber-300">{counts.noQuota}</span>
-              <span className="text-xs text-amber-400/80">无额度</span>
-            </div>
-          )}
-          <div className="flex items-center gap-1.5 rounded-lg border border-emerald-500/25 bg-emerald-500/[0.07] px-2.5 py-1 shadow-glow-emerald" title="账户余额（网站级，只显示一次）">
-            <Wallet size={15} className="text-emerald-400" />
-            <span className="font-mono text-base font-bold text-emerald-300">{formatUsd(balance)}</span>
-          </div>
-          <CopyButton value={site.base_url} label="网址" />
-          <button onClick={onTestSite} disabled={testingSite || total === 0} className="btn-ghost text-xs">
-            {testingSite ? <Loader2 size={14} className="animate-spin" /> : <Activity size={14} />}
-            全部测活
+        <div className="ml-auto flex flex-wrap items-center gap-2">
+          <span className="flex items-center gap-2 rounded-lg bg-white/[0.03] px-2.5 py-1.5 ring-1 ring-white/[0.06]" title="可用 Key / 全部 Key">
+            <span className="flex h-3.5 items-end gap-[3px]" aria-hidden>
+              {keys.slice(0, 12).map((k) => (
+                <span key={k.id} className={`h-full w-1 rounded-full ${STATE_META[states.get(k.id) ?? "untested"].dot}`} />
+              ))}
+            </span>
+            <span className="font-mono text-sm tabular">
+              <span className={available ? "font-bold text-emerald-300" : "text-dark-400"}>{available}</span>
+              <span className="text-dark-500">/{site.keys.length}</span>
+            </span>
+          </span>
+          <BalanceBlock site={site} balance={balance} loading={balanceLoading} />
+          <CopyButton compact value={site.base_url} label="网址" />
+          <button onClick={onTestSite} disabled={busy || site.keys.length === 0} className="btn-secondary btn-sm">
+            {busy ? <Loader2 size={13} className="animate-spin" /> : <Activity size={13} />}
+            测活
           </button>
           {editMode && (
             <>
-              <button onClick={onAddKey} className="btn-ghost text-xs" title="添加 Key / 分组">
-                <Plus size={14} />
-                添加 Key
+              <button onClick={onAddKey} className="icon-btn" title="添加 Key" aria-label="添加 Key">
+                <Plus size={16} />
               </button>
-              <button onClick={onEditSite} className="rounded-md p-1.5 text-slate-400 hover:bg-white/5 hover:text-white" title="编辑网站">
+              <button onClick={onEditSite} className="icon-btn" title="编辑网站" aria-label="编辑网站">
                 <Pencil size={15} />
               </button>
-              <button onClick={onDeleteSite} className="rounded-md p-1.5 text-slate-400 hover:bg-white/5 hover:text-rose-400" title="删除网站">
+              <button onClick={onDeleteSite} className="icon-btn hover:!text-rose-400" title="删除网站" aria-label="删除网站">
                 <Trash2 size={15} />
               </button>
             </>
           )}
         </div>
-      </div>
+      </header>
 
-      {/* keys */}
       {!collapsed && (
-        <div className="space-y-2 p-4">
-          {/* channel chips (choose which provider/model group to show) */}
+        <div className="animate-fade-in space-y-2 border-t border-white/[0.05] bg-dark-950/20 px-4 pb-4 pt-3">
+          {(site.note || site.balance?.error) && (
+            <div className="flex flex-wrap gap-x-4 gap-y-1 pb-1 text-xs">
+              {site.note && (
+                <span className="flex items-center gap-1.5 text-dark-400">
+                  <StickyNote size={13} />
+                  {site.note}
+                </span>
+              )}
+              {site.balance?.error && (
+                <span className="flex items-center gap-1.5 text-amber-300/90">
+                  <AlertTriangle size={13} />
+                  余额读取失败（{formatTimeAgo(site.balance.checked_at)}）：{site.balance.error}
+                </span>
+              )}
+            </div>
+          )}
           {channels.length > 1 && (
             <div className="flex flex-wrap items-center gap-1.5 pb-1">
-              <span className="mr-0.5 text-[11px] text-slate-500">渠道</span>
-              <ChannelChip active={effectiveChannel === "all"} onClick={() => setChannel("all")} label={`全部 ${total}`} />
+              <span className="mr-0.5 text-[11px] text-dark-500">渠道</span>
+              <Chip active={effective === "all"} onClick={() => setChannel("all")} label={`全部 ${site.keys.length}`} />
               {channels.map((p) => (
-                <ChannelChip
-                  key={p}
-                  active={effectiveChannel === p}
-                  onClick={() => setChannel(p)}
-                  label={PROVIDERS[p].label}
-                  badge={PROVIDERS[p].badge}
-                />
+                <Chip key={p} active={effective === p} onClick={() => setChannel(p)} label={PROVIDERS[p].label} />
               ))}
             </div>
           )}
-
           {site.keys.length === 0 ? (
-            <p className="py-6 text-center text-sm text-slate-500">
-              {editMode ? "还没有 Key，点击右上角「添加 Key」" : "该网站还没有 Key"}
-            </p>
-          ) : visibleKeys.length === 0 ? (
-            <p className="py-6 text-center text-sm text-slate-500">该渠道下暂无 Key</p>
+            <p className="py-6 text-center text-sm text-dark-500">{editMode ? "还没有 Key，点击右上角「+」添加" : "该网站还没有 Key"}</p>
           ) : (
-            // One key per row; each key shows all its info on a single line.
-            visibleKeys.map((k) => (
+            visible.map((k) => (
               <KeyRow
                 key={k.id}
                 apiKey={k}
@@ -243,6 +161,7 @@ export function SiteCard({
                 provider={keyProviders.get(k.id) ?? null}
                 accountBalance={balance}
                 testing={testingKeys.has(k.id)}
+                queued={queuedKeys.has(k.id)}
                 onTest={() => onTestKey(k)}
                 onEdit={() => onEditKey(k)}
                 onDelete={() => onDeleteKey(k)}
@@ -251,30 +170,39 @@ export function SiteCard({
           )}
         </div>
       )}
-    </div>
+    </article>
   );
 }
 
-function ChannelChip({
-  active,
-  onClick,
-  label,
-  badge,
-}: {
-  active: boolean;
-  onClick: () => void;
-  label: string;
-  badge?: string;
-}) {
+function BalanceBlock({ site, balance, loading }: { site: Site; balance: number | null; loading: boolean }) {
+  const b = site.balance;
+  const tone = balance == null ? "text-dark-400" : balance > 0 ? "text-emerald-300" : "text-amber-300";
+  const box =
+    balance == null
+      ? "border-white/[0.07] bg-white/[0.02] text-dark-500"
+      : balance > 0
+        ? "border-emerald-500/20 bg-emerald-500/[0.06] text-emerald-400/80"
+        : "border-amber-500/25 bg-amber-500/[0.06] text-amber-400/80";
+  const title = b?.unlimited
+    ? "该 Key 未设额度上限，读不到账户真实余额（New-API 可填写访问令牌读取）"
+    : b?.error
+      ? `余额读取失败：${b.error}`
+      : `账户余额（网站级）${b?.usage_usd != null ? ` · 已用 ${formatUsd(b.usage_usd)}` : ""}${b?.ok_at ? ` · ${formatTimeAgo(b.ok_at)}更新` : ""}`;
+  return (
+    <span className={`flex min-w-[6.5rem] items-center justify-end gap-1.5 rounded-lg border px-2.5 py-1 ${box}`} title={title}>
+      {loading ? <Loader2 size={14} className="animate-spin" /> : <Wallet size={14} />}
+      <span className={`font-mono text-base font-bold tabular ${tone}`}>{b?.unlimited && balance == null ? "不限额" : formatUsd(balance)}</span>
+      {b?.error && <AlertTriangle size={12} className="text-amber-400" />}
+    </span>
+  );
+}
+
+function Chip({ active, onClick, label }: { active: boolean; onClick: () => void; label: string }) {
   return (
     <button
       onClick={onClick}
       className={`rounded-full px-2.5 py-0.5 text-[11px] font-medium ring-1 transition-colors ${
-        active
-          ? "bg-brand-500/15 text-brand-300 ring-brand-500/40"
-          : badge
-            ? `${badge} opacity-70 hover:opacity-100`
-            : "bg-white/5 text-slate-400 ring-white/10 hover:text-slate-200"
+        active ? "bg-primary-500/15 text-primary-200 ring-primary-400/40" : "bg-white/[0.03] text-dark-400 ring-white/10 hover:text-dark-100"
       }`}
     >
       {label}
